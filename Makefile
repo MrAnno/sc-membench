@@ -246,9 +246,15 @@ test: $(TARGET)
 clean:
 	rm -f $(TARGET) $(TARGET_BASIC) $(TARGET_HWLOC) $(TARGET_NUMA) $(TARGET_FULL)
 
-# Install to /usr/local/bin
+# Install to /usr/local (override with: make install prefix=/usr)
+prefix ?= /usr/local
+mandir ?= $(prefix)/share/man
+
 install: $(TARGET)
-	install -m 755 $(TARGET) /usr/local/bin/membench
+	install -d $(DESTDIR)$(prefix)/bin
+	install -m 755 $(TARGET) $(DESTDIR)$(prefix)/bin/membench
+	install -d $(DESTDIR)$(mandir)/man1
+	install -m 644 membench.1 $(DESTDIR)$(mandir)/man1/membench.1
 
 # Show detected configuration
 info:
