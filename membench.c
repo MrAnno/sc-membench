@@ -92,7 +92,7 @@
  * Configuration
  * ============================================================================ */
 
-#define VERSION "1.2.1"
+#define VERSION "1.2.2"
 
 /* Target time per individual measurement (seconds) */
 #define TARGET_TIME_PER_TEST 0.25
