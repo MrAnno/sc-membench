@@ -1,0 +1,9 @@
+.git
+.github
+*.md
+*.1
+membench
+membench-basic
+membench-hwloc
+membench-numa
+membench-full
