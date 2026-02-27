@@ -61,6 +61,10 @@ docker run --rm --privileged ghcr.io/sparecores/membench:main -H > results.csv
 - The `--privileged` flag is recommended for optimal CPU pinning and NUMA support
 - The `-H` flag enables huge pages automatically for large buffers (≥ 2× huge page size), no setup required
 
+## Packaging
+
+sc-membench is packaged in some distributions. For current packaging status and version information across repositories, see [repology.org/project/sc-membench/versions](https://repology.org/project/sc-membench/versions).
+
 ## Build Options
 
 ```bash
