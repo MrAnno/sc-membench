@@ -123,7 +123,7 @@ HAVE_HWLOC := $(shell pkg-config --exists hwloc 2>/dev/null && echo yes || \
 # Check for libnuma (Linux only)
 ifeq ($(UNAME_S),Linux)
     HAVE_NUMA := $(shell pkg-config --exists numa 2>/dev/null && echo yes || \
-                         test -f /usr/include/numa.h && echo yes)
+                         (test -f /usr/include/numa.h && echo yes))
 else
     HAVE_NUMA := no
 endif
@@ -131,7 +131,7 @@ endif
 # Check for libhugetlbfs (Linux only)
 ifeq ($(UNAME_S),Linux)
     HAVE_HUGETLBFS := $(shell pkg-config --exists hugetlbfs 2>/dev/null && echo yes || \
-                              test -f /usr/include/hugetlbfs.h && echo yes)
+                              (test -f /usr/include/hugetlbfs.h && echo yes))
 else
     HAVE_HUGETLBFS := no
 endif
