@@ -1,0 +1,95 @@
+.TH membench 1 "February  9 2026"
+.SH NAME
+membench \- modern memory bandwidth and latency benchmarks
+.SH SYNOPSIS
+.B membench
+.RI [ options ]
+.br
+.SH DESCRIPTION
+This manual page documents briefly the
+.B membench
+command.
+.PP
+\fBmembench\fP is a portable, multi-platform memory bandwidth benchmark designed for
+comprehensive system analysis.
+.br
+Latency measurement uses linked list traversal with random node order
+to defeat prefetchers. Statistical validity ensured via multiple samples
+until coefficient of variation < 5% or max samples reached.
+.TP
+Memory model: each thread gets its own buffer.
+.TP
+Total memory = size_kb × threads (×2 for copy: src + dst).
+.SH OPTIONS
+A summary of options is included below.
+For a complete description, see the Info files.
+
+.TP
+.B \-h
+Show this help
+.TP
+.B \-V
+Print version and exit
+.TP
+.B \-v
+Verbose output (use -vv for more detail)
+.TP
+.B \-s SIZE_KB
+Test only this buffer size (in KB), e.g. -s 1024 for 1MB
+.TP
+.B \-f
+Full sweep (test all sizes up to memory limit)
+.br
+Default: test up to 512 MB per thread
+.TP
+.B \-p THREADS
+Use exactly this many threads (default: num_cpus)
+.TP
+.B \-a
+Auto-scaling: try different thread counts to find best
+.br
+(slower but finds optimal thread count per buffer size)
+.TP
+.B \-t SECONDS
+Maximum runtime, 0 = unlimited (default: unlimited)
+.TP
+.B \-r TRIES
+Repeat each test N times, report best (default: 3)
+.TP
+.B \-o OP
+Run only this operation: read, write, copy, or latency
+.br
+Can be specified multiple times (default: all)
+.TP
+.B \-H
+Enable huge pages for large buffers (>= 4MB)
+.br
+Uses THP (no setup needed) or explicit 2MB pages
+.br
+Automatically skipped for small buffers
+.TP
+.B \-R
+Human-readable output with summary (default: CSV)
+
+.SH ENVIRONMENT VARIABLES
+OpenMP Thread Affinity (environment variables):
+  OMP_PROC_BIND=spread  Spread threads across NUMA nodes (default)
+  OMP_PLACES=cores      One thread per physical core
+  OMP_NUM_THREADS=N     Override thread count
+.SH CSV OUTPUT
+Output: CSV to stdout with columns:
+  size_kb           - Per-thread buffer size (KB)
+  operation         - read, write, copy, or latency
+  bandwidth_mb_s    - Aggregate bandwidth in MB/s (0 for latency)
+  latency_ns        - Median memory latency in ns (0 for bandwidth)
+  latency_stddev_ns - Latency standard deviation in ns (0 for bandwidth)
+  latency_samples   - Number of samples for latency measurement
+  threads           - Thread count used
+  iterations        - Iterations performed
+  elapsed_s         - Elapsed time in seconds
+
+.SH SEE ALSO
+.BR tinymembench (1),
+.BR memtester (8).
+.br
+
