@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE: sparecores/membench
+  IMAGE_OUTPUT: type=registry,push=true,oci-mediatypes=true,compression=zstd,compression-level=7,force-compression=true
 
 jobs:
   build:
@@ -81,8 +82,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          push: true
+          outputs: ${{ env.IMAGE_OUTPUT }}
           tags: ${{ steps.arch-tags.outputs.tags }}
+          build-args: RESOURCE_TRACKER_IMAGE=ghcr.io/sparecores/resource-tracker:main-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
