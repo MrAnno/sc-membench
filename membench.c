@@ -1716,16 +1716,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Initialize */
     srand((unsigned int)time(NULL));  /* Seed RNG for pointer chain randomization */
-    init_system_info();
-    init_numa();
+    platform_init();
 
-    /* Run benchmarks */
     run_all_benchmarks();
 
-    /* Cleanup */
-    cleanup_hwloc();
+    platform_deinit();
 
     return 0;
 }

@@ -112,7 +112,7 @@ use_defaults:
     }
 }
 
-void cleanup_hwloc(void) {
+static void cleanup_hwloc(void) {
     if (g_topology) {
         hwloc_topology_destroy(g_topology);
         g_topology = NULL;
@@ -267,7 +267,7 @@ static void init_cache_info(void) {
     }
 }
 
-void cleanup_hwloc(void) {
+static void cleanup_hwloc(void) {
     /* No-op when hwloc is not used */
 }
 
@@ -316,7 +316,7 @@ static void init_numa_topology(void) {
     }
 }
 
-void init_numa(void) {
+static void init_numa(void) {
 #ifdef USE_NUMA
     if (numa_available() >= 0) {
         g_platform.numa_nodes = numa_max_node() + 1;
@@ -345,7 +345,7 @@ void init_numa(void) {
  * System info
  * ============================================================================ */
 
-void init_system_info(void) {
+static void init_system_info(void) {
     /* Get number of CPUs (POSIX, works on all platforms) */
     g_platform.num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (g_platform.num_cpus < 1) g_platform.num_cpus = 1;
@@ -405,4 +405,13 @@ void init_system_info(void) {
 
     /* Detect cache topology (must be called after g_platform.num_cpus is set) */
     init_cache_info();
+}
+
+void platform_init(void) {
+    init_system_info();
+    init_numa();
+}
+
+void platform_deinit(void) {
+    cleanup_hwloc();
 }

@@ -67,13 +67,8 @@ extern platform_info_t g_platform;
 /* Verbosity: 0=quiet, 1=summary, 2=detailed. Defined in membench.c. */
 extern int g_verbose;
 
-/* ============================================================================
- * Init-only entry points (platform.c)
- * ============================================================================ */
-
-void init_system_info(void);   /* CPUs, memory, then cache topology */
-void init_numa(void);          /* NUMA node count and CPU-to-node map */
-void cleanup_hwloc(void);      /* release hwloc topology (no-op without hwloc) */
+void platform_init(void);
+void platform_deinit(void);
 
 /* ============================================================================
  * Huge pages
