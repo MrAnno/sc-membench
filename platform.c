@@ -17,20 +17,13 @@
  * Detected machine
  * ============================================================================ */
 
-int g_num_cpus = 0;
-int g_numa_nodes = 0;
-size_t g_total_memory = 0;
+platform_info_t g_platform;
 
 /* NUMA topology - CPUs per node for balanced thread distribution */
 #define MAX_NUMA_NODES 64
 #define MAX_CPUS_PER_NODE 512
 static int g_cpus_per_node[MAX_NUMA_NODES];           /* Count of CPUs on each node */
 static int g_node_cpus[MAX_NUMA_NODES][MAX_CPUS_PER_NODE];  /* CPU IDs for each node */
-
-/* Detected cache sizes (per core) */
-size_t g_l1_cache_size = 0;
-size_t g_l2_cache_size = 0;
-size_t g_l3_cache_size = 0;
 
 /* Minimum total buffer size - adaptive based on cache topology */
 static size_t g_min_total_size = 4096;  /* Default 4KB, updated after cache detection */
@@ -69,7 +62,7 @@ static void init_cache_info(void) {
     if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
         hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
         if (obj && obj->attr && obj->attr->cache.type != HWLOC_OBJ_CACHE_INSTRUCTION) {
-            g_l1_cache_size = obj->attr->cache.size;
+            g_platform.l1_cache_size = obj->attr->cache.size;
         }
     }
 
@@ -78,7 +71,7 @@ static void init_cache_info(void) {
     if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
         hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
         if (obj && obj->attr) {
-            g_l2_cache_size = obj->attr->cache.size;
+            g_platform.l2_cache_size = obj->attr->cache.size;
         }
     }
 
@@ -87,12 +80,12 @@ static void init_cache_info(void) {
     if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
         hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
         if (obj && obj->attr) {
-            g_l3_cache_size = obj->attr->cache.size;
+            g_platform.l3_cache_size = obj->attr->cache.size;
         }
     }
 
     /* Count total L3 cache (sum across all L3 objects for distributed caches) */
-    if (g_l3_cache_size > 0) {
+    if (g_platform.l3_cache_size > 0) {
         depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L3CACHE);
         int num_l3 = hwloc_get_nbobjs_by_depth(g_topology, depth);
         if (g_verbose && num_l3 > 1) {
@@ -102,20 +95,20 @@ static void init_cache_info(void) {
 
 use_defaults:
     /* Set defaults if detection failed */
-    if (g_l1_cache_size == 0) g_l1_cache_size = 32 * 1024;      /* 32 KB */
-    if (g_l2_cache_size == 0) g_l2_cache_size = 256 * 1024;     /* 256 KB */
-    if (g_l3_cache_size == 0) g_l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
+    if (g_platform.l1_cache_size == 0) g_platform.l1_cache_size = 32 * 1024;      /* 32 KB */
+    if (g_platform.l2_cache_size == 0) g_platform.l2_cache_size = 256 * 1024;     /* 256 KB */
+    if (g_platform.l3_cache_size == 0) g_platform.l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
 
     /* Calculate adaptive minimum total size:
      * Use 16KB per thread × num_cpus so each thread has a reliable buffer size.
      * This ensures all CPUs can participate with meaningful measurements. */
-    g_min_total_size = 16384 * g_num_cpus;  /* 16KB per thread minimum */
+    g_min_total_size = 16384 * g_platform.num_cpus;  /* 16KB per thread minimum */
 
     if (g_verbose) {
         fprintf(stderr, "Cache (hwloc): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
-                g_l1_cache_size / 1024, g_l2_cache_size / 1024, g_l3_cache_size / 1024);
+                g_platform.l1_cache_size / 1024, g_platform.l2_cache_size / 1024, g_platform.l3_cache_size / 1024);
         fprintf(stderr, "Minimum total test size: %zu KB (16KB × %d CPUs)\n",
-                g_min_total_size / 1024, g_num_cpus);
+                g_min_total_size / 1024, g_platform.num_cpus);
     }
 }
 
@@ -181,9 +174,9 @@ static void init_cache_info_linux(void) {
         if (size == 0) continue;
 
         switch (level) {
-            case 1: if (g_l1_cache_size == 0) g_l1_cache_size = size; break;
-            case 2: if (g_l2_cache_size == 0) g_l2_cache_size = size; break;
-            case 3: if (g_l3_cache_size == 0) g_l3_cache_size = size; break;
+            case 1: if (g_platform.l1_cache_size == 0) g_platform.l1_cache_size = size; break;
+            case 2: if (g_platform.l2_cache_size == 0) g_platform.l2_cache_size = size; break;
+            case 3: if (g_platform.l3_cache_size == 0) g_platform.l3_cache_size = size; break;
         }
     }
 }
@@ -197,19 +190,19 @@ static void init_cache_info_macos(void) {
 
     /* L1 data cache */
     if (sysctlbyname("hw.l1dcachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l1_cache_size = size;
+        g_platform.l1_cache_size = size;
     }
 
     /* L2 cache */
     len = sizeof(size);
     if (sysctlbyname("hw.l2cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l2_cache_size = size;
+        g_platform.l2_cache_size = size;
     }
 
     /* L3 cache (may not exist on all Macs) */
     len = sizeof(size);
     if (sysctlbyname("hw.l3cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l3_cache_size = size;
+        g_platform.l3_cache_size = size;
     }
 }
 #endif /* PLATFORM_MACOS */
@@ -224,15 +217,15 @@ static void init_cache_info_bsd(void) {
 
     /* Try various BSD sysctl names */
     if (sysctlbyname("hw.l1dcachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l1_cache_size = size;
+        g_platform.l1_cache_size = size;
     }
     len = sizeof(size);
     if (sysctlbyname("hw.l2cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l2_cache_size = size;
+        g_platform.l2_cache_size = size;
     }
     len = sizeof(size);
     if (sysctlbyname("hw.l3cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l3_cache_size = size;
+        g_platform.l3_cache_size = size;
     }
 }
 #endif /* PLATFORM_BSD */
@@ -257,20 +250,20 @@ static void init_cache_info(void) {
 #endif
 
     /* Set defaults if detection failed */
-    if (g_l1_cache_size == 0) g_l1_cache_size = 32 * 1024;      /* 32 KB */
-    if (g_l2_cache_size == 0) g_l2_cache_size = 256 * 1024;     /* 256 KB */
-    if (g_l3_cache_size == 0) g_l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
+    if (g_platform.l1_cache_size == 0) g_platform.l1_cache_size = 32 * 1024;      /* 32 KB */
+    if (g_platform.l2_cache_size == 0) g_platform.l2_cache_size = 256 * 1024;     /* 256 KB */
+    if (g_platform.l3_cache_size == 0) g_platform.l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
 
     /* Calculate adaptive minimum total size:
      * Use 16KB per thread × num_cpus so each thread has a reliable buffer size. */
-    g_min_total_size = 16384 * g_num_cpus;  /* 16KB per thread minimum */
+    g_min_total_size = 16384 * g_platform.num_cpus;  /* 16KB per thread minimum */
 
     if (g_verbose) {
         fprintf(stderr, "Cache (%s): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
-                method, g_l1_cache_size / 1024, g_l2_cache_size / 1024,
-                g_l3_cache_size / 1024);
+                method, g_platform.l1_cache_size / 1024, g_platform.l2_cache_size / 1024,
+                g_platform.l3_cache_size / 1024);
         fprintf(stderr, "Minimum total test size: %zu KB (16KB × %d CPUs)\n",
-                g_min_total_size / 1024, g_num_cpus);
+                g_min_total_size / 1024, g_platform.num_cpus);
     }
 }
 
@@ -290,9 +283,9 @@ static void init_numa_topology(void) {
     memset(g_node_cpus, 0, sizeof(g_node_cpus));
 
 #ifdef USE_NUMA
-    if (numa_available() >= 0 && g_numa_nodes > 1) {
+    if (numa_available() >= 0 && g_platform.numa_nodes > 1) {
         /* Build CPU-to-node mapping using libnuma */
-        for (int cpu = 0; cpu < g_num_cpus && cpu < MAX_NUMA_NODES * MAX_CPUS_PER_NODE; cpu++) {
+        for (int cpu = 0; cpu < g_platform.num_cpus && cpu < MAX_NUMA_NODES * MAX_CPUS_PER_NODE; cpu++) {
             int node = numa_node_of_cpu(cpu);
             if (node >= 0 && node < MAX_NUMA_NODES) {
                 int idx = g_cpus_per_node[node];
@@ -305,7 +298,7 @@ static void init_numa_topology(void) {
 
         if (g_verbose) {
             fprintf(stderr, "NUMA topology:\n");
-            for (int node = 0; node < g_numa_nodes; node++) {
+            for (int node = 0; node < g_platform.numa_nodes; node++) {
                 fprintf(stderr, "  Node %d: %d CPUs (first: %d, last: %d)\n",
                         node, g_cpus_per_node[node],
                         g_cpus_per_node[node] > 0 ? g_node_cpus[node][0] : -1,
@@ -316,28 +309,28 @@ static void init_numa_topology(void) {
 #endif
     {
         /* UMA or NUMA not enabled: all CPUs on "node 0" */
-        for (int cpu = 0; cpu < g_num_cpus && cpu < MAX_CPUS_PER_NODE; cpu++) {
+        for (int cpu = 0; cpu < g_platform.num_cpus && cpu < MAX_CPUS_PER_NODE; cpu++) {
             g_node_cpus[0][cpu] = cpu;
         }
-        g_cpus_per_node[0] = g_num_cpus < MAX_CPUS_PER_NODE ? g_num_cpus : MAX_CPUS_PER_NODE;
+        g_cpus_per_node[0] = g_platform.num_cpus < MAX_CPUS_PER_NODE ? g_platform.num_cpus : MAX_CPUS_PER_NODE;
     }
 }
 
 void init_numa(void) {
 #ifdef USE_NUMA
     if (numa_available() >= 0) {
-        g_numa_nodes = numa_max_node() + 1;
+        g_platform.numa_nodes = numa_max_node() + 1;
         if (g_verbose) {
-            fprintf(stderr, "NUMA: %d nodes detected (libnuma enabled)\n", g_numa_nodes);
+            fprintf(stderr, "NUMA: %d nodes detected (libnuma enabled)\n", g_platform.numa_nodes);
         }
     } else {
-        g_numa_nodes = 1;
+        g_platform.numa_nodes = 1;
         if (g_verbose) {
             fprintf(stderr, "NUMA: not available (libnuma enabled but no NUMA support)\n");
         }
     }
 #else
-    g_numa_nodes = 1;
+    g_platform.numa_nodes = 1;
     if (g_verbose) {
         fprintf(stderr, "NUMA: disabled (compile with -DUSE_NUMA -lnuma to enable)\n");
     }
@@ -354,18 +347,18 @@ void init_numa(void) {
 
 void init_system_info(void) {
     /* Get number of CPUs (POSIX, works on all platforms) */
-    g_num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (g_num_cpus < 1) g_num_cpus = 1;
+    g_platform.num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    if (g_platform.num_cpus < 1) g_platform.num_cpus = 1;
 
     /* Get total memory (platform-specific methods) */
-    g_total_memory = 0;
+    g_platform.total_memory = 0;
 
 #ifdef PLATFORM_LINUX
     /* Linux: sysconf is reliable */
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGESIZE);
     if (pages > 0 && page_size > 0) {
-        g_total_memory = (size_t)pages * (size_t)page_size;
+        g_platform.total_memory = (size_t)pages * (size_t)page_size;
     }
 #endif
 
@@ -374,7 +367,7 @@ void init_system_info(void) {
     int64_t memsize = 0;
     size_t len = sizeof(memsize);
     if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) == 0 && memsize > 0) {
-        g_total_memory = (size_t)memsize;
+        g_platform.total_memory = (size_t)memsize;
     }
 #endif
 
@@ -383,33 +376,33 @@ void init_system_info(void) {
     unsigned long physmem = 0;
     size_t len = sizeof(physmem);
     if (sysctlbyname("hw.physmem", &physmem, &len, NULL, 0) == 0 && physmem > 0) {
-        g_total_memory = (size_t)physmem;
+        g_platform.total_memory = (size_t)physmem;
     } else {
         /* Fallback to sysconf */
         long pages = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGESIZE);
         if (pages > 0 && page_size > 0) {
-            g_total_memory = (size_t)pages * (size_t)page_size;
+            g_platform.total_memory = (size_t)pages * (size_t)page_size;
         }
     }
 #endif
 
     /* Fallback if detection failed */
-    if (g_total_memory == 0) {
+    if (g_platform.total_memory == 0) {
         long pages = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGESIZE);
         if (pages > 0 && page_size > 0) {
-            g_total_memory = (size_t)pages * (size_t)page_size;
+            g_platform.total_memory = (size_t)pages * (size_t)page_size;
         } else {
-            g_total_memory = 1024UL * 1024 * 1024;  /* Default 1GB */
+            g_platform.total_memory = 1024UL * 1024 * 1024;  /* Default 1GB */
         }
     }
 
     if (g_verbose) {
         fprintf(stderr, "System: %d CPUs, %.2f GB memory\n",
-                g_num_cpus, g_total_memory / (1024.0 * 1024 * 1024));
+                g_platform.num_cpus, g_platform.total_memory / (1024.0 * 1024 * 1024));
     }
 
-    /* Detect cache topology (must be called after g_num_cpus is set) */
+    /* Detect cache topology (must be called after g_platform.num_cpus is set) */
     init_cache_info();
 }

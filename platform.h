@@ -50,15 +50,19 @@
 #endif
 
 /* ============================================================================
- * Detected machine (written by init_system_info / init_numa, read everywhere)
+ * Detected machine (filled by init_system_info / init_numa, read everywhere)
  * ============================================================================ */
 
-extern int g_num_cpus;
-extern size_t g_total_memory;
-extern size_t g_l1_cache_size;   /* per core */
-extern size_t g_l2_cache_size;
-extern size_t g_l3_cache_size;
-extern int g_numa_nodes;
+typedef struct {
+    int num_cpus;
+    size_t total_memory;
+    size_t l1_cache_size;     /* per core */
+    size_t l2_cache_size;
+    size_t l3_cache_size;
+    int numa_nodes;
+} platform_info_t;
+
+extern platform_info_t g_platform;
 
 /* Verbosity: 0=quiet, 1=summary, 2=detailed. Defined in membench.c. */
 extern int g_verbose;
