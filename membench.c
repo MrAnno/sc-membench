@@ -16,12 +16,6 @@
  *   make basic        # Minimal build, no optional dependencies
  *   make full         # All features (Linux: hwloc + numa + hugetlbfs)
  *
- * Manual compilation:
- *   gcc -O3 -fopenmp -o membench membench.c -lm
- *   # With optional libraries:
- *   gcc -O3 -fopenmp -DUSE_HWLOC -DUSE_NUMA -DHAVE_HUGETLBFS \
- *       -o membench membench.c -lm -lhwloc -lnuma -lhugetlbfs
- *
  * Usage:
  *   ./membench [options]
  *   ./membench -h   # Show help
