@@ -54,6 +54,8 @@
 #include <sys/mman.h>
 #include <math.h>
 
+#include "utils.h"
+
 /* Platform-specific includes */
 #ifdef PLATFORM_LINUX
 #include <sched.h>
@@ -278,16 +280,6 @@ static size_t g_l3_cache_size = 0;
 static size_t g_min_total_size = 4096;  /* Default 4KB, updated after cache detection */
 
 /* ============================================================================
- * Timing
- * ============================================================================ */
-
-static inline double get_time(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
-
-/* ============================================================================
  * Memory operations
  * ============================================================================ */
 
@@ -421,45 +413,6 @@ struct LatencyNode {
 #define LATENCY_MIN_SAMPLES 7        /* Minimum samples for statistical validity */
 #define LATENCY_MAX_SAMPLES 21       /* Maximum samples (enough for robust statistics) */
 #define LATENCY_TARGET_CV 0.05       /* Target coefficient of variation (5%) */
-
-/* Comparison function for qsort (double ascending) */
-static int compare_double(const void *a, const void *b) {
-    double da = *(const double *)a;
-    double db = *(const double *)b;
-    if (da < db) return -1;
-    if (da > db) return 1;
-    return 0;
-}
-
-/* Calculate median of sorted array */
-static double calculate_median(double *sorted, int n) {
-    if (n == 0) return 0;
-    if (n % 2 == 0) {
-        return (sorted[n/2 - 1] + sorted[n/2]) / 2.0;
-    }
-    return sorted[n/2];
-}
-
-/* Calculate mean of array */
-static double calculate_mean(double *arr, int n) {
-    if (n == 0) return 0;
-    double sum = 0;
-    for (int i = 0; i < n; i++) {
-        sum += arr[i];
-    }
-    return sum / n;
-}
-
-/* Calculate standard deviation of array */
-static double calculate_stddev(double *arr, int n, double mean) {
-    if (n < 2) return 0;
-    double sum_sq = 0;
-    for (int i = 0; i < n; i++) {
-        double diff = arr[i] - mean;
-        sum_sq += diff * diff;
-    }
-    return sqrt(sum_sq / (n - 1));  /* Sample standard deviation */
-}
 
 /* Fisher-Yates shuffle for node pointer array */
 static void shuffle_nodes(LatencyNode **nodes, size_t n) {
@@ -1659,18 +1612,6 @@ static int* get_thread_counts(int *count) {
     return tc;
 }
 
-/* Round size to nearest power of 2 for cleaner output */
-static size_t round_to_power_of_2(size_t size) {
-    if (size == 0) return 4096;
-    size_t power = 1;
-    while (power < size) power <<= 1;
-    /* Return closer of power and power/2 */
-    if (power - size > size - power/2 && power/2 >= 4096) {
-        return power / 2;
-    }
-    return power;
-}
-
 /* Get sizes to test (per-thread buffer sizes) - adaptive based on cache hierarchy
  * 
  * Generates sizes at critical cache transition points to show:
@@ -1756,30 +1697,6 @@ static size_t* get_sizes(int *count) {
     sizes[n] = 0;
     *count = n;
     return sizes;
-}
-
-/* Format size for human readable output (e.g., 1024 KB -> "1 MB") */
-static const char* format_size(size_t size_kb, char *buf, size_t buf_size) {
-    if (size_kb >= 1024 * 1024) {
-        snprintf(buf, buf_size, "%zu GB", size_kb / (1024 * 1024));
-    } else if (size_kb >= 1024) {
-        snprintf(buf, buf_size, "%zu MB", size_kb / 1024);
-    } else {
-        snprintf(buf, buf_size, "%zu KB", size_kb);
-    }
-    return buf;
-}
-
-/* Format bandwidth for human readable output */
-static const char* format_bandwidth(double mb_s, char *buf, size_t buf_size) {
-    if (mb_s >= 1000000) {
-        snprintf(buf, buf_size, "%.1f TB/s", mb_s / 1000000);
-    } else if (mb_s >= 1000) {
-        snprintf(buf, buf_size, "%.1f GB/s", mb_s / 1000);
-    } else {
-        snprintf(buf, buf_size, "%.1f MB/s", mb_s);
-    }
-    return buf;
 }
 
 static void print_csv_header(void) {
