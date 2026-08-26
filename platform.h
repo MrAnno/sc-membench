@@ -49,9 +49,6 @@
 #include <numaif.h>
 #endif
 
-/* ============================================================================
- * Detected machine (filled by init_system_info / init_numa, read everywhere)
- * ============================================================================ */
 
 typedef struct {
     int num_cpus;
@@ -62,10 +59,9 @@ typedef struct {
     int numa_nodes;
 } platform_info_t;
 
-extern platform_info_t g_platform;
 extern int g_verbose;
 
-void platform_init(void);
+void platform_init(platform_info_t *pi);
 void platform_deinit(void);
 
 /* ============================================================================

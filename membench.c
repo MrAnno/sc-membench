@@ -306,7 +306,8 @@ static void shuffle_nodes(LatencyNode **nodes, size_t n) {
 
 /* Allocate memory for latency chain with NUMA awareness and huge page support
  * Uses mmap with optional huge pages to reduce TLB overhead for large buffers */
-static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
+static LatencyNode* alloc_latency_memory(const platform_info_t *pi, size_t num_nodes, size_t *alloc_size) {
+    (void)pi;  /* only used with USE_NUMA */
     size_t size = num_nodes * sizeof(LatencyNode);
     *alloc_size = size;
 
@@ -360,11 +361,11 @@ static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
 
 #ifdef USE_NUMA
     /* Bind memory to NUMA node 0 (where CPU 0 is) for consistent latency measurement */
-    if (numa_available() >= 0 && g_platform.numa_nodes > 1) {
+    if (numa_available() >= 0 && pi->numa_nodes > 1) {
         int node = numa_node_of_cpu(0);
         if (node >= 0) {
             unsigned long nodemask = 1UL << node;
-            mbind(memory, *alloc_size, MPOL_BIND, &nodemask, g_platform.numa_nodes + 1, MPOL_MF_MOVE);
+            mbind(memory, *alloc_size, MPOL_BIND, &nodemask, pi->numa_nodes + 1, MPOL_MF_MOVE);
             if (g_verbose >= 2) {
                 fprintf(stderr, "  Latency memory bound to NUMA node %d\n", node);
             }
@@ -386,11 +387,11 @@ static void free_latency_memory(LatencyNode *memory, size_t alloc_size) {
  * Memory is contiguous (good for allocation) but traversal is random
  * (defeats prefetcher, measures true memory latency)
  * Returns: start node pointer; caller must track alloc_size for freeing */
-static LatencyNode* init_latency_chain(size_t num_nodes, size_t *alloc_size) {
+static LatencyNode* init_latency_chain(const platform_info_t *pi, size_t num_nodes, size_t *alloc_size) {
     if (num_nodes < 2) return NULL;
 
     /* Allocate contiguous memory for all nodes using NUMA-aware allocation */
-    LatencyNode *memory = alloc_latency_memory(num_nodes, alloc_size);
+    LatencyNode *memory = alloc_latency_memory(pi, num_nodes, alloc_size);
     if (!memory) return NULL;
 
     /* Initialize payloads (also touches pages for NUMA first-touch policy) */
@@ -498,7 +499,7 @@ typedef struct {
  *
  * Returns statistically valid latency measurement
  */
-static latency_stats_t measure_latency_stats(size_t buffer_size) {
+static latency_stats_t measure_latency_stats(const platform_info_t *pi, size_t buffer_size) {
     latency_stats_t stats = {0};
 
     /* Pin thread to CPU 0 for consistent latency measurement.
@@ -512,7 +513,7 @@ static latency_stats_t measure_latency_stats(size_t buffer_size) {
 
     /* Initialize chain with NUMA-aware allocation */
     size_t alloc_size = 0;
-    LatencyNode *start = init_latency_chain(num_nodes, &alloc_size);
+    LatencyNode *start = init_latency_chain(pi, num_nodes, &alloc_size);
     if (!start) {
         fprintf(stderr, "Failed to allocate %zu bytes for latency test\n",
                 num_nodes * sizeof(LatencyNode));
@@ -1046,8 +1047,8 @@ static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
  *   32 cores:  1, 2, 4, 8, 16, 32    (6 values)
  *   48 cores:  1, 2, 4, 8, 16, 32, 48 (7 values)
  */
-static int* get_thread_counts(int *count) {
-    int nproc = g_platform.num_cpus;
+static int* get_thread_counts(const platform_info_t *pi, int *count) {
+    int nproc = pi->num_cpus;
     if (nproc < 1) nproc = 1;
 
     /* Cap at nproc - oversubscription causes unreliable benchmark results
@@ -1085,17 +1086,17 @@ static int* get_thread_counts(int *count) {
  *
  * All sizes are strictly increasing with no overlaps.
  */
-static size_t* get_sizes(int *count) {
-    int nthreads = g_explicit_threads > 0 ? g_explicit_threads : g_platform.num_cpus;
+static size_t* get_sizes(const platform_info_t *pi, int *count) {
+    int nthreads = g_explicit_threads > 0 ? g_explicit_threads : pi->num_cpus;
     if (nthreads < 1) nthreads = 1;
 
     /* Use detected cache sizes, with sensible defaults */
-    size_t l1 = g_platform.l1_cache_size > 0 ? g_platform.l1_cache_size : 32768;      /* 32 KB */
-    size_t l2 = g_platform.l2_cache_size > 0 ? g_platform.l2_cache_size : 262144;     /* 256 KB */
-    size_t l3 = g_platform.l3_cache_size > 0 ? g_platform.l3_cache_size : 8388608;    /* 8 MB */
+    size_t l1 = pi->l1_cache_size > 0 ? pi->l1_cache_size : 32768;      /* 32 KB */
+    size_t l2 = pi->l2_cache_size > 0 ? pi->l2_cache_size : 262144;     /* 256 KB */
+    size_t l3 = pi->l3_cache_size > 0 ? pi->l3_cache_size : 8388608;    /* 8 MB */
 
     /* Memory limit per thread */
-    size_t max_size = g_platform.total_memory / 2 / nthreads;
+    size_t max_size = pi->total_memory / 2 / nthreads;
 
     /* Build strictly increasing size sequence */
     size_t sizes_list[20];
@@ -1255,7 +1256,7 @@ static void update_summary(const result_t *r) {
 }
 
 /* Print summary statistics */
-static void print_summary(void) {
+static void print_summary(const platform_info_t *pi) {
     fprintf(stderr, "\n");
     fprintf(stderr, "================================================================================\n");
     fprintf(stderr, "                           BENCHMARK SUMMARY\n");
@@ -1366,7 +1367,7 @@ static void print_summary(void) {
         }
         if (g_explicit_threads > 0) {
             fprintf(stderr, "  - Fixed thread count (-p %d) instead of using all CPUs (%d)\n",
-                    g_explicit_threads, g_platform.num_cpus);
+                    g_explicit_threads, pi->num_cpus);
             has_warnings = 1;
         }
         if (g_single_size > 0) {
@@ -1398,7 +1399,7 @@ static void print_summary(void) {
  * 2. Explicit threads (g_explicit_threads>0): Use exactly that many threads
  * 3. Default (neither): Use num_cpus threads
  */
-static result_t find_best_config(size_t buffer_size, operation_t op,
+static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, operation_t op,
                                  int *thread_counts, int tc_count) {
     result_t best = {0};
     best.size = buffer_size;
@@ -1407,13 +1408,13 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
     /* For latency test: single-thread, statistically valid measurement */
     if (op == OP_LATENCY) {
         size_t max_latency = MAX_LATENCY_SIZE;
-        if (g_platform.total_memory / 4 < max_latency) {
-            max_latency = g_platform.total_memory / 4;
+        if (pi->total_memory / 4 < max_latency) {
+            max_latency = pi->total_memory / 4;
         }
         size_t latency_size = (buffer_size > max_latency) ? max_latency : buffer_size;
 
         double start = get_time();
-        latency_stats_t stats = measure_latency_stats(latency_size);
+        latency_stats_t stats = measure_latency_stats(pi, latency_size);
         double elapsed = get_time() - start;
 
         best.size = buffer_size;
@@ -1441,7 +1442,7 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
 
             int bufs_per_op = (op == OP_COPY) ? 2 : 1;
             size_t memory_needed = buffer_size * nthreads * bufs_per_op;
-            if (memory_needed > g_platform.total_memory / 4) {
+            if (memory_needed > pi->total_memory / 4) {
                 continue;
             }
 
@@ -1465,13 +1466,13 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
     if (g_explicit_threads > 0) {
         nthreads = g_explicit_threads;
     } else {
-        nthreads = g_platform.num_cpus;
+        nthreads = pi->num_cpus;
     }
 
     /* Check memory limit and reduce threads if needed */
     int bufs_per_op = (op == OP_COPY) ? 2 : 1;
     size_t memory_needed = buffer_size * nthreads * bufs_per_op;
-    while (nthreads > 1 && memory_needed > g_platform.total_memory / 4) {
+    while (nthreads > 1 && memory_needed > pi->total_memory / 4) {
         nthreads /= 2;
         memory_needed = buffer_size * nthreads * bufs_per_op;
     }
@@ -1482,11 +1483,11 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
     return best;
 }
 
-static void run_all_benchmarks(void) {
+static void run_all_benchmarks(const platform_info_t *pi) {
     double start_time = get_time();
 
     int tc_count;
-    int *thread_counts = get_thread_counts(&tc_count);
+    int *thread_counts = get_thread_counts(pi, &tc_count);
 
     /* Single size mode */
     if (g_single_size > 0) {
@@ -1500,7 +1501,7 @@ static void run_all_benchmarks(void) {
         for (int op = 0; op < 4 && g_running; op++) {
             if (!(g_ops_mask & (1 << op))) continue;
 
-            result_t best = find_best_config(g_single_size, (operation_t)op,
+            result_t best = find_best_config(pi, g_single_size, (operation_t)op,
                                             thread_counts, tc_count);
 
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
@@ -1518,22 +1519,22 @@ static void run_all_benchmarks(void) {
         }
 
         /* Print summary in human-readable mode */
-        if (g_human_readable) print_summary();
+        if (g_human_readable) print_summary(pi);
         return;
     }
 
     /* Normal mode: test all sizes */
     int size_count;
-    size_t *sizes = get_sizes(&size_count);
+    size_t *sizes = get_sizes(pi, &size_count);
 
     if (g_verbose) {
         fprintf(stderr, "Testing %d buffer sizes (per thread, adaptive to cache hierarchy)\n", size_count);
         if (g_auto_scaling) {
-            fprintf(stderr, "Thread mode: auto-scaling (trying 1-%d threads)\n", g_platform.num_cpus);
+            fprintf(stderr, "Thread mode: auto-scaling (trying 1-%d threads)\n", pi->num_cpus);
         } else if (g_explicit_threads > 0) {
             fprintf(stderr, "Thread mode: fixed %d threads\n", g_explicit_threads);
         } else {
-            fprintf(stderr, "Thread mode: num_cpus (%d threads)\n", g_platform.num_cpus);
+            fprintf(stderr, "Thread mode: num_cpus (%d threads)\n", pi->num_cpus);
         }
         fprintf(stderr, "OpenMP: proc_bind(spread) for NUMA-aware thread placement\n");
     }
@@ -1546,7 +1547,7 @@ static void run_all_benchmarks(void) {
         for (int op = 0; op < 4 && g_running; op++) {
             if (!(g_ops_mask & (1 << op))) continue;
 
-            result_t best = find_best_config(size, (operation_t)op,
+            result_t best = find_best_config(pi, size, (operation_t)op,
                                              thread_counts, tc_count);
 
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
@@ -1577,7 +1578,7 @@ static void run_all_benchmarks(void) {
     }
 
     /* Print summary in human-readable mode */
-    if (g_human_readable) print_summary();
+    if (g_human_readable) print_summary(pi);
 }
 
 /* ============================================================================
@@ -1714,9 +1715,11 @@ int main(int argc, char *argv[]) {
     }
 
     srand((unsigned int)time(NULL));  /* Seed RNG for pointer chain randomization */
-    platform_init();
 
-    run_all_benchmarks();
+    platform_info_t platform_info;
+    platform_init(&platform_info);
+
+    run_all_benchmarks(&platform_info);
 
     platform_deinit();
 
