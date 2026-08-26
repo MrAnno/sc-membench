@@ -18,6 +18,8 @@
 #endif
 
 #include <stddef.h>
+
+#include "membench.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -59,7 +61,6 @@ typedef struct {
     int numa_nodes;
 } platform_info_t;
 
-extern int g_verbose;
 
 void platform_init(platform_info_t *pi);
 void platform_deinit(void);

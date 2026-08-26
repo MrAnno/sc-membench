@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "membench.h"
 #include "platform.h"
 #include "utils.h"
 
@@ -20,8 +21,6 @@
 #include <numa.h>
 #include <numaif.h>
 #endif
-
-extern int g_use_hugepages;
 
 /* Prevent compiler from optimizing away operations */
 static volatile uint64_t g_latency_sink = 0;

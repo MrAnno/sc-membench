@@ -36,6 +36,7 @@
 #include <sys/mman.h>
 #include <math.h>
 
+#include "membench.h"
 #include "latency.h"
 #include "platform.h"
 #include "utils.h"
@@ -47,53 +48,10 @@
 #endif
 
 /* ============================================================================
- * Configuration
- * ============================================================================ */
-
-#define VERSION "1.2.2"
-
-/* Target time per individual measurement (seconds) */
-#define TARGET_TIME_PER_TEST 0.25
-
-/* Minimum iterations per test (keep low for large buffers that take seconds per iteration) */
-#define MIN_ITERATIONS 3
-
-/* Maximum iterations per test */
-#define MAX_ITERATIONS 10000000
-
-/* Default total runtime target (seconds). 0 = unlimited */
-#define DEFAULT_MAX_RUNTIME 0
-
-/* Fixed RAM sizes for when we need to measure pure memory bandwidth */
-#define RAM_SIZE_1 (64UL * 1024 * 1024)   /* 64 MB - definitely past any L3 */
-#define RAM_SIZE_2 (256UL * 1024 * 1024)  /* 256 MB - more RAM data points */
-
-/* ============================================================================
  * Types
  * ============================================================================ */
 
-typedef enum {
-    OP_READ,
-    OP_WRITE,
-    OP_COPY,
-    OP_LATENCY   /* Memory latency test using pointer chasing */
-} operation_t;
-
-static const char* OP_NAMES[] = {"read", "write", "copy", "latency"};
-
-typedef struct {
-    size_t size;
-    operation_t op;
-    int threads;
-    double bandwidth_mb_s;  /* For read/write/copy */
-    double latency_ns;      /* For latency test (median) */
-    double latency_mean_ns; /* For latency test (mean) */
-    double latency_stddev_ns; /* For latency test (standard deviation) */
-    double latency_cv;      /* Coefficient of variation (stddev/mean) */
-    int latency_samples;    /* Number of samples for latency measurement */
-    double elapsed_s;
-    int iterations;
-} result_t;
+const char *const OP_NAMES[] = {"read", "write", "copy", "latency"};
 
 /* Summary statistics structure */
 typedef struct {
@@ -135,7 +93,7 @@ static summary_t g_summary = {0};
  * ============================================================================ */
 
 static volatile int g_running = 1;
-int g_verbose = 0;  /* 0=quiet, 1=summary, 2=detailed (shared with platform.c) */
+int g_verbose = 0;  /* 0=quiet, 1=summary, 2=detailed */
 static int g_full_sweep = 0;      /* If 1, test all sizes up to max; if 0, stop early when converged */
 static size_t g_single_size = 0;  /* If > 0, test only this size (in bytes) */
 static int g_human_readable = 0;  /* If 1, output human-readable format instead of CSV */
@@ -153,7 +111,7 @@ static int g_auto_scaling = 0;
 static double g_max_runtime = DEFAULT_MAX_RUNTIME;
 
 /* Huge pages support */
-int g_use_hugepages = 0;  /* shared with latency.h */
+int g_use_hugepages = 0;
 
 /* Operation selection bitmask (bit 0=read, 1=write, 2=copy, 3=latency) */
 #define OP_MASK_ALL 0x0F  /* All operations enabled */
