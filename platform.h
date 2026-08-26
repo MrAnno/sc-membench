@@ -63,8 +63,6 @@ typedef struct {
 } platform_info_t;
 
 extern platform_info_t g_platform;
-
-/* Verbosity: 0=quiet, 1=summary, 2=detailed. Defined in membench.c. */
 extern int g_verbose;
 
 void platform_init(void);

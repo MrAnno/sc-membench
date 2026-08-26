@@ -102,13 +102,15 @@ else
         # Other architectures: use generic optimization
         CFLAGS_ARCH = -mtune=generic
     endif
+    # glibc hides POSIX/GNU APIs (sched_setaffinity, clock_gettime, getopt, ...) under -std=c11
+    CFLAGS_OS = -D_GNU_SOURCE
     CFLAGS_PATHS =
     LDFLAGS_PATHS =
     LDFLAGS_BASE = -lm
     OPENMP_LIBS =
 endif
 
-CFLAGS = $(CFLAGS_BASE) $(CFLAGS_ARCH) $(CFLAGS_PATHS) $(OPENMP_FLAG)
+CFLAGS = $(CFLAGS_BASE) $(CFLAGS_ARCH) $(CFLAGS_OS) $(CFLAGS_PATHS) $(OPENMP_FLAG)
 LDFLAGS = $(OPENMP_FLAG) $(LDFLAGS_BASE) $(LDFLAGS_PATHS) $(OPENMP_LIBS)
 
 # =============================================================================

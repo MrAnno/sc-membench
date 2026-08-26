@@ -3,10 +3,6 @@
  * Licensed under Mozilla Public License 2.0
  */
 
-/* glibc hides POSIX/GNU APIs (sched_setaffinity, clock_gettime, getopt, ...)
- * under -std=c11 unless this is defined before the first libc header. */
-#define _GNU_SOURCE
-
 #include "platform.h"
 
 #include <stdint.h>

@@ -24,9 +24,6 @@
  * Licensed under Mozilla Public License 2.0
  */
 
-/* Enable GNU extensions on Linux for CPU affinity (must be before includes) */
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
