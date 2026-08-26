@@ -24,23 +24,8 @@
  * Licensed under Mozilla Public License 2.0
  */
 
-/* Platform detection (may be overridden by compiler flags) */
-#if !defined(PLATFORM_LINUX) && !defined(PLATFORM_MACOS) && !defined(PLATFORM_BSD)
-    #if defined(__linux__)
-        #define PLATFORM_LINUX
-    #elif defined(__APPLE__) && defined(__MACH__)
-        #define PLATFORM_MACOS
-    #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
-        #define PLATFORM_BSD
-    #endif
-#endif
-
 /* Enable GNU extensions on Linux for CPU affinity (must be before includes) */
-#ifdef PLATFORM_LINUX
-#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
-#endif
-#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,29 +39,8 @@
 #include <sys/mman.h>
 #include <math.h>
 
+#include "platform.h"
 #include "utils.h"
-
-/* Platform-specific includes */
-#ifdef PLATFORM_LINUX
-#include <sched.h>
-#endif
-
-#ifdef PLATFORM_BSD
-#include <sys/param.h>
-#include <sys/cpuset.h>
-#include <sys/sysctl.h>
-#endif
-
-#ifdef PLATFORM_MACOS
-#include <sys/sysctl.h>
-#include <mach/mach.h>
-#include <mach/thread_policy.h>
-#endif
-
-/* Optional library: libhugetlbfs (Linux only, for huge page size detection) */
-#if defined(HAVE_HUGETLBFS) && defined(PLATFORM_LINUX)
-#include <hugetlbfs.h>
-#endif
 
 /* Optional library: NUMA support (Linux only) */
 #ifdef USE_NUMA
@@ -105,70 +69,6 @@
 /* Fixed RAM sizes for when we need to measure pure memory bandwidth */
 #define RAM_SIZE_1 (64UL * 1024 * 1024)   /* 64 MB - definitely past any L3 */
 #define RAM_SIZE_2 (256UL * 1024 * 1024)  /* 256 MB - more RAM data points */
-
-/* Get huge page size dynamically from the system.
- * Tries multiple methods in order of reliability:
- *   1. libhugetlbfs (if available, most reliable)
- *   2. /proc/meminfo (Linux)
- *   3. sysctl (macOS/BSD)
- *   4. Default fallback (2MB for x86, common size)
- * Returns the default huge page size (typically 2MB on x86, varies on ARM). */
-static size_t get_huge_page_size(void) {
-    static size_t cached_size = 0;
-    if (cached_size != 0) return cached_size;
-
-#if defined(HAVE_HUGETLBFS) && defined(PLATFORM_LINUX)
-    /* Method 1: libhugetlbfs (most reliable on Linux) */
-    long size = gethugepagesize();
-    if (size > 0) {
-        cached_size = (size_t)size;
-        return cached_size;
-    }
-#endif
-
-#ifdef PLATFORM_LINUX
-    /* Method 2: Parse /proc/meminfo */
-    FILE *file = fopen("/proc/meminfo", "r");
-    if (file) {
-        char line[256];
-        unsigned long size_kb = 0;
-        while (fgets(line, sizeof(line), file)) {
-            if (sscanf(line, "Hugepagesize: %lu kB", &size_kb) == 1) {
-                cached_size = size_kb * 1024;
-                fclose(file);
-                return cached_size;
-            }
-        }
-        fclose(file);
-    }
-#endif
-
-#if defined(PLATFORM_MACOS) || defined(PLATFORM_BSD)
-    /* Method 3: sysctl for macOS/BSD (get VM page size, huge pages vary) */
-    /* Note: macOS doesn't have traditional huge pages like Linux,
-     * but we can use vm.pagesize as a reference. Superpage support varies. */
-    int mib[2] = { CTL_HW, HW_PAGESIZE };
-    int pagesize = 0;
-    size_t len = sizeof(pagesize);
-    if (sysctl(mib, 2, &pagesize, &len, NULL, 0) == 0 && pagesize > 0) {
-        /* On macOS, superpage size is typically 2MB on Intel, 16KB on ARM
-         * but there's no standard API to query it. Use 2MB as common default. */
-        cached_size = 2UL * 1024 * 1024;
-        return cached_size;
-    }
-#endif
-
-    /* Method 4: Default fallback (2MB, most common huge page size) */
-    cached_size = 2UL * 1024 * 1024;
-    return cached_size;
-}
-
-/* Minimum buffer size to use huge pages (2 huge pages).
- * Below this threshold, TLB pressure isn't significant and huge pages
- * would waste memory (each allocation rounds up to huge page boundary). */
-static size_t get_huge_page_threshold(void) {
-    return 2 * get_huge_page_size();
-}
 
 /* ============================================================================
  * Types
@@ -203,15 +103,15 @@ typedef struct {
     double peak_read_mb_s;
     double peak_write_mb_s;
     double peak_copy_mb_s;
-    
+
     /* Best latency for large buffer sizes (RAM latency) */
     double best_latency_ns;
-    
+
     /* Weighted average bandwidth (larger sizes weighted more) */
     double weighted_avg_read_mb_s;
     double weighted_avg_write_mb_s;
     double weighted_avg_copy_mb_s;
-    
+
     /* Counts and weights for weighted average */
     double read_weight_sum;
     double write_weight_sum;
@@ -219,10 +119,10 @@ typedef struct {
     double read_bw_weighted_sum;
     double write_bw_weighted_sum;
     double copy_bw_weighted_sum;
-    
+
     /* Track the largest size tested for "RAM" results */
     size_t largest_size_tested;
-    
+
     /* Count of measurements */
     int read_count;
     int write_count;
@@ -237,19 +137,10 @@ static summary_t g_summary = {0};
  * ============================================================================ */
 
 static volatile int g_running = 1;
-static int g_verbose = 0;  /* 0=quiet, 1=summary, 2=detailed */
+int g_verbose = 0;  /* 0=quiet, 1=summary, 2=detailed (shared with platform.c) */
 static int g_full_sweep = 0;      /* If 1, test all sizes up to max; if 0, stop early when converged */
 static size_t g_single_size = 0;  /* If > 0, test only this size (in bytes) */
 static int g_human_readable = 0;  /* If 1, output human-readable format instead of CSV */
-static int g_num_cpus = 0;
-static int g_numa_nodes = 0;
-static size_t g_total_memory = 0;
-
-/* NUMA topology - CPUs per node for balanced thread distribution */
-#define MAX_NUMA_NODES 64
-#define MAX_CPUS_PER_NODE 512
-static int g_cpus_per_node[MAX_NUMA_NODES];           /* Count of CPUs on each node */
-static int g_node_cpus[MAX_NUMA_NODES][MAX_CPUS_PER_NODE];  /* CPU IDs for each node */
 /* Number of times to run each benchmark, taking best result (like lmbench TRIES=11) */
 #define DEFAULT_BENCHMARK_TRIES 3
 static int g_benchmark_tries = DEFAULT_BENCHMARK_TRIES;
@@ -271,14 +162,6 @@ static int g_use_hugepages = 0;
 static int g_ops_mask = OP_MASK_ALL;
 
 
-/* Detected cache sizes (per core) */
-static size_t g_l1_cache_size = 0;
-static size_t g_l2_cache_size = 0;
-static size_t g_l3_cache_size = 0;
-
-/* Minimum total buffer size - adaptive based on cache topology */
-static size_t g_min_total_size = 4096;  /* Default 4KB, updated after cache detection */
-
 /* ============================================================================
  * Memory operations
  * ============================================================================ */
@@ -286,7 +169,7 @@ static size_t g_min_total_size = 4096;  /* Default 4KB, updated after cache dete
 /* Prevent compiler from optimizing away operations */
 static volatile uint64_t g_sink = 0;
 
-/* 
+/*
  * Memory operations - heavily optimized for bandwidth measurement
  * Key techniques:
  * 1. Multiple independent accumulators to break dependency chains
@@ -296,15 +179,15 @@ static volatile uint64_t g_sink = 0;
 
 /* Read operation: XOR all 64-bit words with independent accumulators
  * XOR is faster than ADD and has no carry dependency chains */
-static inline __attribute__((always_inline)) 
+static inline __attribute__((always_inline))
 uint64_t mem_read(const void *buf, size_t size) {
     const uint64_t *p = (const uint64_t *)buf;
     const uint64_t *end = p + (size / sizeof(uint64_t));
-    
+
     /* Use 8 independent accumulators - each one handles every 8th element */
     uint64_t x0 = 0, x1 = 0, x2 = 0, x3 = 0;
     uint64_t x4 = 0, x5 = 0, x6 = 0, x7 = 0;
-    
+
     /* Process 32 elements (256 bytes) per iteration */
     while (p + 32 <= end) {
         x0 ^= p[0];  x1 ^= p[1];  x2 ^= p[2];  x3 ^= p[3];
@@ -317,7 +200,7 @@ uint64_t mem_read(const void *buf, size_t size) {
         x4 ^= p[28]; x5 ^= p[29]; x6 ^= p[30]; x7 ^= p[31];
         p += 32;
     }
-    
+
     /* Handle remaining elements */
     while (p + 8 <= end) {
         x0 ^= p[0]; x1 ^= p[1]; x2 ^= p[2]; x3 ^= p[3];
@@ -327,7 +210,7 @@ uint64_t mem_read(const void *buf, size_t size) {
     while (p < end) {
         x0 ^= *p++;
     }
-    
+
     return x0 ^ x1 ^ x2 ^ x3 ^ x4 ^ x5 ^ x6 ^ x7;
 }
 
@@ -336,7 +219,7 @@ static inline __attribute__((always_inline))
 void mem_write(void *buf, size_t size, uint64_t pattern) {
     uint64_t *p = (uint64_t *)buf;
     uint64_t *end = p + (size / sizeof(uint64_t));
-    
+
     /* Process 32 elements (256 bytes) per iteration */
     while (p + 32 <= end) {
         p[0]  = pattern; p[1]  = pattern; p[2]  = pattern; p[3]  = pattern;
@@ -349,7 +232,7 @@ void mem_write(void *buf, size_t size, uint64_t pattern) {
         p[28] = pattern; p[29] = pattern; p[30] = pattern; p[31] = pattern;
         p += 32;
     }
-    
+
     /* Handle remaining */
     while (p < end) {
         *p++ = pattern;
@@ -362,7 +245,7 @@ void mem_copy(void *dst, const void *src, size_t size) {
     const uint64_t *s = (const uint64_t *)src;
     uint64_t *d = (uint64_t *)dst;
     const uint64_t *end = s + (size / sizeof(uint64_t));
-    
+
     /* Process 32 elements (256 bytes) per iteration */
     while (s + 32 <= end) {
         d[0]  = s[0];  d[1]  = s[1];  d[2]  = s[2];  d[3]  = s[3];
@@ -376,25 +259,25 @@ void mem_copy(void *dst, const void *src, size_t size) {
         s += 32;
         d += 32;
     }
-    
+
     /* Handle remaining */
     while (s < end) {
         *d++ = *s++;
     }
 }
 
-/* 
+/*
  * Memory latency test using pointer chasing
- * 
+ *
  * This implementation is based on ram_bench by Emil Ernerfeldt:
  *   https://github.com/emilk/ram_bench
- * 
+ *
  * Recommended by Alex Miller.
- * 
+ *
  * Uses a linked list traversal approach where each node contains a payload
  * and a pointer to the next node. Nodes are allocated contiguously but
  * linked in random order to defeat hardware prefetchers.
- * 
+ *
  * Key insight from ram_bench: random memory access cost is O(√N) due to
  * cache hierarchy (L1, L2, L3, RAM) and the fundamental limit that memory
  * within distance r from CPU is bounded by r² (Bekenstein bound).
@@ -429,16 +312,16 @@ static void shuffle_nodes(LatencyNode **nodes, size_t n) {
 static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
     size_t size = num_nodes * sizeof(LatencyNode);
     *alloc_size = size;
-    
+
     LatencyNode *memory = MAP_FAILED;
     int try_hugepages = g_use_hugepages && (size >= get_huge_page_threshold());
-    
+
     if (try_hugepages) {
         /* Round up size to huge page boundary */
         size_t hp_size = get_huge_page_size();
         size_t aligned_size = (size + hp_size - 1) & ~(hp_size - 1);
         *alloc_size = aligned_size;
-        
+
 #ifdef MAP_HUGETLB
         /* Try explicit huge pages first */
         memory = (LatencyNode *)mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
@@ -449,7 +332,7 @@ static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
             }
         }
 #endif
-        
+
         /* Fall back to THP (Transparent Huge Pages) */
         if (memory == MAP_FAILED) {
             memory = (LatencyNode *)mmap(NULL, size, PROT_READ | PROT_WRITE,
@@ -468,16 +351,16 @@ static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
             }
         }
     }
-    
+
     /* Regular allocation if huge pages disabled or failed */
     if (memory == MAP_FAILED) {
         memory = (LatencyNode *)mmap(NULL, size, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         *alloc_size = size;
     }
-    
+
     if (memory == MAP_FAILED) return NULL;
-    
+
 #ifdef USE_NUMA
     /* Bind memory to NUMA node 0 (where CPU 0 is) for consistent latency measurement */
     if (numa_available() >= 0 && g_numa_nodes > 1) {
@@ -491,7 +374,7 @@ static LatencyNode* alloc_latency_memory(size_t num_nodes, size_t *alloc_size) {
         }
     }
 #endif
-    
+
     return memory;
 }
 
@@ -508,46 +391,46 @@ static void free_latency_memory(LatencyNode *memory, size_t alloc_size) {
  * Returns: start node pointer; caller must track alloc_size for freeing */
 static LatencyNode* init_latency_chain(size_t num_nodes, size_t *alloc_size) {
     if (num_nodes < 2) return NULL;
-    
+
     /* Allocate contiguous memory for all nodes using NUMA-aware allocation */
     LatencyNode *memory = alloc_latency_memory(num_nodes, alloc_size);
     if (!memory) return NULL;
-    
+
     /* Initialize payloads (also touches pages for NUMA first-touch policy) */
     for (size_t i = 0; i < num_nodes; i++) {
         memory[i].payload = i;  /* Unique payload for each node */
     }
-    
+
     /* Create array of pointers for shuffling */
     LatencyNode **nodes = (LatencyNode **)malloc(num_nodes * sizeof(LatencyNode *));
     if (!nodes) {
         free_latency_memory(memory, *alloc_size);
         return NULL;
     }
-    
+
     for (size_t i = 0; i < num_nodes; i++) {
         nodes[i] = &memory[i];
     }
-    
+
     /* Shuffle to create random traversal order */
     shuffle_nodes(nodes, num_nodes);
-    
+
     /* Link nodes in shuffled order (circular) */
     for (size_t i = 0; i < num_nodes - 1; i++) {
         nodes[i]->next = nodes[i + 1];
     }
     nodes[num_nodes - 1]->next = nodes[0];  /* Close the loop */
-    
+
     LatencyNode *start = nodes[0];
     free(nodes);
-    
+
     return start;
 }
 
 /* Free latency chain - need base address and size */
 static void free_latency_chain(LatencyNode *start, size_t num_nodes, size_t alloc_size) {
     if (!start || num_nodes == 0) return;
-    
+
     /* Find the lowest address in the chain (that's where mmap'd block starts) */
     LatencyNode *min_addr = start;
     LatencyNode *node = start->next;
@@ -557,48 +440,8 @@ static void free_latency_chain(LatencyNode *start, size_t num_nodes, size_t allo
         node = node->next;
         visited++;
     }
-    
+
     free_latency_memory(min_addr, alloc_size);
-}
-
-/* Pin current thread to CPU 0 for consistent latency measurement.
- * Platform-specific implementations for Linux, macOS, and BSD. */
-static void pin_thread_to_cpu0(void) {
-    int success = 0;
-    
-#ifdef PLATFORM_LINUX
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    success = (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0);
-#endif
-
-#ifdef PLATFORM_BSD
-    cpuset_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    success = (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1,
-                                   sizeof(cpuset), &cpuset) == 0);
-#endif
-
-#ifdef PLATFORM_MACOS
-    /* macOS doesn't have true CPU affinity, but we can suggest affinity
-     * via thread_policy_set with THREAD_AFFINITY_POLICY.
-     * This is a hint, not a guarantee. */
-    thread_affinity_policy_data_t policy = { 0 };  /* Affinity tag 0 */
-    success = (thread_policy_set(mach_thread_self(), THREAD_AFFINITY_POLICY,
-                                 (thread_policy_t)&policy, 
-                                 THREAD_AFFINITY_POLICY_COUNT) == KERN_SUCCESS);
-#endif
-
-    if (g_verbose >= 2) {
-        if (success) {
-            fprintf(stderr, "  Latency thread pinned to CPU 0\n");
-        } else {
-            fprintf(stderr, "  Warning: Could not pin thread to CPU 0\n");
-        }
-    }
-    (void)success;  /* Suppress unused warning if no platform matched */
 }
 
 /* Chase through linked list - each load depends on previous
@@ -607,7 +450,7 @@ static inline __attribute__((always_inline))
 LatencyNode* chase_latency_chain(LatencyNode *start, size_t count) {
     LatencyNode *node = start;
     volatile uint64_t sink = 0;  /* Prevent optimization */
-    
+
     /* Unroll 8x to reduce loop overhead while maintaining dependency chain */
     size_t i = count;
     while (i >= 8) {
@@ -626,7 +469,7 @@ LatencyNode* chase_latency_chain(LatencyNode *start, size_t count) {
         node = node->next;
         i--;
     }
-    
+
     g_sink += sink;  /* Store to global to prevent optimization */
     return node;
 }
@@ -647,7 +490,7 @@ typedef struct {
 #define LATENCY_MIN_SAMPLE_TIME 0.01    /* 10ms minimum for timer precision */
 
 /* Measure latency with statistical validity
- * 
+ *
  * Strategy:
  * 1. Create random linked list covering the buffer size
  * 2. Warmup by traversing the list once
@@ -660,93 +503,93 @@ typedef struct {
  */
 static latency_stats_t measure_latency_stats(size_t buffer_size) {
     latency_stats_t stats = {0};
-    
+
     /* Pin thread to CPU 0 for consistent latency measurement.
      * This prevents OS scheduler from migrating the thread during measurement,
      * which would cause inconsistent results due to cache effects and NUMA. */
     pin_thread_to_cpu0();
-    
+
     /* Calculate number of nodes that fit in buffer */
     size_t num_nodes = buffer_size / sizeof(LatencyNode);
     if (num_nodes < 64) num_nodes = 64;  /* Minimum for meaningful measurement */
-    
+
     /* Initialize chain with NUMA-aware allocation */
     size_t alloc_size = 0;
     LatencyNode *start = init_latency_chain(num_nodes, &alloc_size);
     if (!start) {
-        fprintf(stderr, "Failed to allocate %zu bytes for latency test\n", 
+        fprintf(stderr, "Failed to allocate %zu bytes for latency test\n",
                 num_nodes * sizeof(LatencyNode));
         return stats;
     }
-    
+
     /* Warmup: single traversal to prime caches and stabilize CPU */
     chase_latency_chain(start, num_nodes);
-    
+
     /* Calibration: time a single traversal to estimate latency */
     double cal_start = get_time();
     chase_latency_chain(start, num_nodes);
     double cal_elapsed = get_time() - cal_start;
-    
+
     /* Calculate traversals needed to achieve target sample time */
     double estimated_latency_s = cal_elapsed / num_nodes;
     size_t traversals_per_sample;
-    
+
     if (estimated_latency_s > 0) {
         /* Calculate traversals to reach target sample time */
         double target_accesses = LATENCY_TARGET_SAMPLE_TIME / estimated_latency_s;
         traversals_per_sample = (size_t)(target_accesses / num_nodes);
-        
+
         /* Ensure at least 1 full traversal per sample */
         if (traversals_per_sample < 1) traversals_per_sample = 1;
-        
+
         /* Cap at reasonable maximum for very fast (L1) accesses */
         if (traversals_per_sample > 10000) traversals_per_sample = 10000;
     } else {
         /* Fallback: at least 1 traversal */
         traversals_per_sample = 1;
     }
-    
+
     /* Sample collection */
     double samples[LATENCY_MAX_SAMPLES];
     int num_samples = 0;
     size_t total_accesses = 0;
-    
+
     /* Collect samples until statistically valid or max reached */
     while (num_samples < LATENCY_MAX_SAMPLES) {
         size_t accesses_this_sample = num_nodes * traversals_per_sample;
-        
+
         /* Time this sample */
         double start_time = get_time();
         chase_latency_chain(start, accesses_this_sample);
         double end_time = get_time();
-        
+
         double elapsed = end_time - start_time;
         double latency_ns = (elapsed * 1e9) / accesses_this_sample;
-        
+
         samples[num_samples++] = latency_ns;
         total_accesses += accesses_this_sample;
-        
+
         /* Check if we have enough samples and they're stable */
         if (num_samples >= LATENCY_MIN_SAMPLES) {
             double mean = calculate_mean(samples, num_samples);
             double stddev = calculate_stddev(samples, num_samples, mean);
             double cv = (mean > 0) ? (stddev / mean) : 1.0;
-            
+
             /* Stop if coefficient of variation is acceptable */
             if (cv < LATENCY_TARGET_CV) {
                 break;
             }
         }
     }
-    
+
     /* Calculate final statistics */
     double mean = calculate_mean(samples, num_samples);
     double stddev = calculate_stddev(samples, num_samples, mean);
-    
+
     /* Sort for median calculation */
     qsort(samples, num_samples, sizeof(double), compare_double);
     double median = calculate_median(samples, num_samples);
-    
+
     /* Populate result */
     stats.median_ns = median;
     stats.mean_ns = mean;
@@ -754,10 +597,10 @@ static latency_stats_t measure_latency_stats(size_t buffer_size) {
     stats.cv = (mean > 0) ? (stddev / mean) : 0;
     stats.num_samples = num_samples;
     stats.total_accesses = total_accesses;
-    
+
     /* Cleanup */
     free_latency_chain(start, num_nodes, alloc_size);
-    
+
     return stats;
 }
 
@@ -768,29 +611,29 @@ static latency_stats_t measure_latency_stats(size_t buffer_size) {
 static void* alloc_buffer(size_t size) {
     void *buf = MAP_FAILED;
     int try_hugepages = g_use_hugepages && (size >= get_huge_page_threshold());
-    
+
     if (try_hugepages) {
-        /* 
+        /*
          * Strategy: prefer THP over explicit huge pages because:
          * 1. THP doesn't require pre-allocation by root
          * 2. THP is managed automatically by the kernel
          * 3. Explicit huge pages may fail if pool isn't configured
-         * 
+         *
          * We try explicit huge pages first only because they're more
          * deterministic (guaranteed 2MB pages vs THP's best-effort).
          */
-        
+
 #ifdef MAP_HUGETLB
         /* Round up size to huge page boundary for explicit huge pages */
         size_t hp_size = get_huge_page_size();
         size_t aligned_size = (size + hp_size - 1) & ~(hp_size - 1);
-        
+
         /* Try explicit huge pages (uses pre-allocated pool if available) */
         buf = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
         if (buf != MAP_FAILED) {
             if (g_verbose >= 2) {
-                fprintf(stderr, "  Allocated %zu bytes using explicit %zu KB huge pages\n", 
+                fprintf(stderr, "  Allocated %zu bytes using explicit %zu KB huge pages\n",
                         aligned_size, hp_size / 1024);
             }
             /* Touch all pages to ensure they're allocated */
@@ -799,7 +642,7 @@ static void* alloc_buffer(size_t size) {
         }
         /* Explicit huge pages failed - likely no pool configured, try THP */
 #endif
-        
+
         /* Use mmap + madvise for Transparent Huge Pages (no pre-allocation needed) */
         buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -825,18 +668,18 @@ static void* alloc_buffer(size_t size) {
             return buf;
         }
     }
-    
+
     /* Regular allocation: small buffers, huge pages disabled, or fallback */
     buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    
+
     if (buf == MAP_FAILED) {
         return NULL;
     }
-    
+
     /* Touch all pages to ensure they're allocated */
     memset(buf, 0, size);
-    
+
     return buf;
 }
 
@@ -847,391 +690,12 @@ static void free_buffer(void *buf, size_t size) {
 }
 
 /* ============================================================================
- * Cache topology detection using hwloc (portable: x86, arm64, etc.)
- * 
- * Install hwloc:
- *   Debian/Ubuntu: apt-get install libhwloc-dev
- *   RHEL/CentOS:   yum install hwloc-devel
- *   macOS:         brew install hwloc
- * ============================================================================ */
-
-#ifdef USE_HWLOC
-#include <hwloc.h>
-
-static hwloc_topology_t g_topology = NULL;
-
-/* Detect cache sizes using hwloc */
-static void init_cache_info(void) {
-    if (hwloc_topology_init(&g_topology) < 0) {
-        goto use_defaults;
-    }
-    
-    if (hwloc_topology_load(g_topology) < 0) {
-        hwloc_topology_destroy(g_topology);
-        g_topology = NULL;
-        goto use_defaults;
-    }
-    
-    /* Find cache sizes by iterating through cache objects */
-    int depth;
-    
-    /* L1 Data Cache */
-    depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L1CACHE);
-    if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
-        hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
-        if (obj && obj->attr && obj->attr->cache.type != HWLOC_OBJ_CACHE_INSTRUCTION) {
-            g_l1_cache_size = obj->attr->cache.size;
-        }
-    }
-    
-    /* L2 Cache */
-    depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L2CACHE);
-    if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
-        hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
-        if (obj && obj->attr) {
-            g_l2_cache_size = obj->attr->cache.size;
-        }
-    }
-    
-    /* L3 Cache */
-    depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L3CACHE);
-    if (depth != HWLOC_TYPE_DEPTH_UNKNOWN) {
-        hwloc_obj_t obj = hwloc_get_obj_by_depth(g_topology, depth, 0);
-        if (obj && obj->attr) {
-            g_l3_cache_size = obj->attr->cache.size;
-        }
-    }
-    
-    /* Count total L3 cache (sum across all L3 objects for distributed caches) */
-    if (g_l3_cache_size > 0) {
-        depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L3CACHE);
-        int num_l3 = hwloc_get_nbobjs_by_depth(g_topology, depth);
-        if (g_verbose && num_l3 > 1) {
-            fprintf(stderr, "Note: %d L3 caches detected (distributed across dies)\n", num_l3);
-        }
-    }
-    
-use_defaults:
-    /* Set defaults if detection failed */
-    if (g_l1_cache_size == 0) g_l1_cache_size = 32 * 1024;      /* 32 KB */
-    if (g_l2_cache_size == 0) g_l2_cache_size = 256 * 1024;     /* 256 KB */
-    if (g_l3_cache_size == 0) g_l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
-    
-    /* Calculate adaptive minimum total size:
-     * Use 16KB per thread × num_cpus so each thread has a reliable buffer size.
-     * This ensures all CPUs can participate with meaningful measurements. */
-    g_min_total_size = 16384 * g_num_cpus;  /* 16KB per thread minimum */
-    
-    if (g_verbose) {
-        fprintf(stderr, "Cache (hwloc): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
-                g_l1_cache_size / 1024, g_l2_cache_size / 1024, g_l3_cache_size / 1024);
-        fprintf(stderr, "Minimum total test size: %zu KB (16KB × %d CPUs)\n",
-                g_min_total_size / 1024, g_num_cpus);
-    }
-}
-
-static void cleanup_hwloc(void) {
-    if (g_topology) {
-        hwloc_topology_destroy(g_topology);
-        g_topology = NULL;
-    }
-}
-
-#else /* !USE_HWLOC - fallback to platform-specific methods */
-
-#ifdef PLATFORM_LINUX
-/* Parse cache size from sysfs (handles "48K", "1024K", "32768K" format) */
-static size_t parse_cache_size_sysfs(const char *str) {
-    size_t size = 0;
-    char unit = 0;
-    if (sscanf(str, "%zu%c", &size, &unit) >= 1) {
-        if (unit == 'K' || unit == 'k') size *= 1024;
-        else if (unit == 'M' || unit == 'm') size *= 1024 * 1024;
-    }
-    return size;
-}
-
-/* Read cache info from sysfs (Linux-specific) */
-static void init_cache_info_linux(void) {
-    char path[256];
-    char buf[64];
-    FILE *f;
-    
-    for (int index = 0; index < 10; index++) {
-        /* Read level */
-        snprintf(path, sizeof(path), 
-                 "/sys/devices/system/cpu/cpu0/cache/index%d/level", index);
-        f = fopen(path, "r");
-        if (!f) continue;
-        int level = -1;
-        if (fgets(buf, sizeof(buf), f)) level = atoi(buf);
-        fclose(f);
-        if (level < 0) continue;
-        
-        /* Read type */
-        snprintf(path, sizeof(path), 
-                 "/sys/devices/system/cpu/cpu0/cache/index%d/type", index);
-        f = fopen(path, "r");
-        if (!f) continue;
-        char type[32] = "";
-        if (fgets(type, sizeof(type), f)) type[strcspn(type, "\n")] = 0;
-        fclose(f);
-        
-        /* Skip instruction caches */
-        if (strcmp(type, "Instruction") == 0) continue;
-        
-        /* Read size */
-        snprintf(path, sizeof(path), 
-                 "/sys/devices/system/cpu/cpu0/cache/index%d/size", index);
-        f = fopen(path, "r");
-        if (!f) continue;
-        size_t size = 0;
-        if (fgets(buf, sizeof(buf), f)) size = parse_cache_size_sysfs(buf);
-        fclose(f);
-        
-        if (size == 0) continue;
-        
-        switch (level) {
-            case 1: if (g_l1_cache_size == 0) g_l1_cache_size = size; break;
-            case 2: if (g_l2_cache_size == 0) g_l2_cache_size = size; break;
-            case 3: if (g_l3_cache_size == 0) g_l3_cache_size = size; break;
-        }
-    }
-}
-#endif /* PLATFORM_LINUX */
-
-#ifdef PLATFORM_MACOS
-/* Read cache info from sysctl (macOS-specific) */
-static void init_cache_info_macos(void) {
-    size_t size;
-    size_t len = sizeof(size);
-    
-    /* L1 data cache */
-    if (sysctlbyname("hw.l1dcachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l1_cache_size = size;
-    }
-    
-    /* L2 cache */
-    len = sizeof(size);
-    if (sysctlbyname("hw.l2cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l2_cache_size = size;
-    }
-    
-    /* L3 cache (may not exist on all Macs) */
-    len = sizeof(size);
-    if (sysctlbyname("hw.l3cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l3_cache_size = size;
-    }
-}
-#endif /* PLATFORM_MACOS */
-
-#ifdef PLATFORM_BSD
-/* Read cache info from sysctl (BSD-specific) */
-static void init_cache_info_bsd(void) {
-    /* FreeBSD and other BSDs have limited sysctl cache info.
-     * Try standard hw.cacheXXX values, fall back to defaults. */
-    size_t size;
-    size_t len = sizeof(size);
-    
-    /* Try various BSD sysctl names */
-    if (sysctlbyname("hw.l1dcachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l1_cache_size = size;
-    }
-    len = sizeof(size);
-    if (sysctlbyname("hw.l2cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l2_cache_size = size;
-    }
-    len = sizeof(size);
-    if (sysctlbyname("hw.l3cachesize", &size, &len, NULL, 0) == 0 && size > 0) {
-        g_l3_cache_size = size;
-    }
-}
-#endif /* PLATFORM_BSD */
-
-/* Platform-agnostic cache info initialization */
-static void init_cache_info(void) {
-    const char *method = "defaults";
-    
-#ifdef PLATFORM_LINUX
-    init_cache_info_linux();
-    method = "sysfs";
-#endif
-
-#ifdef PLATFORM_MACOS
-    init_cache_info_macos();
-    method = "sysctl";
-#endif
-
-#ifdef PLATFORM_BSD
-    init_cache_info_bsd();
-    method = "sysctl";
-#endif
-    
-    /* Set defaults if detection failed */
-    if (g_l1_cache_size == 0) g_l1_cache_size = 32 * 1024;      /* 32 KB */
-    if (g_l2_cache_size == 0) g_l2_cache_size = 256 * 1024;     /* 256 KB */
-    if (g_l3_cache_size == 0) g_l3_cache_size = 8 * 1024 * 1024; /* 8 MB */
-    
-    /* Calculate adaptive minimum total size:
-     * Use 16KB per thread × num_cpus so each thread has a reliable buffer size. */
-    g_min_total_size = 16384 * g_num_cpus;  /* 16KB per thread minimum */
-    
-    if (g_verbose) {
-        fprintf(stderr, "Cache (%s): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
-                method, g_l1_cache_size / 1024, g_l2_cache_size / 1024, 
-                g_l3_cache_size / 1024);
-        fprintf(stderr, "Minimum total test size: %zu KB (16KB × %d CPUs)\n",
-                g_min_total_size / 1024, g_num_cpus);
-    }
-}
-
-static void cleanup_hwloc(void) {
-    /* No-op when hwloc is not used */
-}
-
-#endif /* USE_HWLOC */
-
-/* ============================================================================
- * NUMA support
- * ============================================================================ */
-
-static void init_numa_topology(void) {
-    /* Initialize topology arrays */
-    memset(g_cpus_per_node, 0, sizeof(g_cpus_per_node));
-    memset(g_node_cpus, 0, sizeof(g_node_cpus));
-    
-#ifdef USE_NUMA
-    if (numa_available() >= 0 && g_numa_nodes > 1) {
-        /* Build CPU-to-node mapping using libnuma */
-        for (int cpu = 0; cpu < g_num_cpus && cpu < MAX_NUMA_NODES * MAX_CPUS_PER_NODE; cpu++) {
-            int node = numa_node_of_cpu(cpu);
-            if (node >= 0 && node < MAX_NUMA_NODES) {
-                int idx = g_cpus_per_node[node];
-                if (idx < MAX_CPUS_PER_NODE) {
-                    g_node_cpus[node][idx] = cpu;
-                    g_cpus_per_node[node]++;
-                }
-            }
-        }
-        
-        if (g_verbose) {
-            fprintf(stderr, "NUMA topology:\n");
-            for (int node = 0; node < g_numa_nodes; node++) {
-                fprintf(stderr, "  Node %d: %d CPUs (first: %d, last: %d)\n",
-                        node, g_cpus_per_node[node],
-                        g_cpus_per_node[node] > 0 ? g_node_cpus[node][0] : -1,
-                        g_cpus_per_node[node] > 0 ? g_node_cpus[node][g_cpus_per_node[node]-1] : -1);
-            }
-        }
-    } else
-#endif
-    {
-        /* UMA or NUMA not enabled: all CPUs on "node 0" */
-        for (int cpu = 0; cpu < g_num_cpus && cpu < MAX_CPUS_PER_NODE; cpu++) {
-            g_node_cpus[0][cpu] = cpu;
-        }
-        g_cpus_per_node[0] = g_num_cpus < MAX_CPUS_PER_NODE ? g_num_cpus : MAX_CPUS_PER_NODE;
-    }
-}
-
-static void init_numa(void) {
-#ifdef USE_NUMA
-    if (numa_available() >= 0) {
-        g_numa_nodes = numa_max_node() + 1;
-        if (g_verbose) {
-            fprintf(stderr, "NUMA: %d nodes detected (libnuma enabled)\n", g_numa_nodes);
-        }
-    } else {
-        g_numa_nodes = 1;
-        if (g_verbose) {
-            fprintf(stderr, "NUMA: not available (libnuma enabled but no NUMA support)\n");
-        }
-    }
-#else
-    g_numa_nodes = 1;
-    if (g_verbose) {
-        fprintf(stderr, "NUMA: disabled (compile with -DUSE_NUMA -lnuma to enable)\n");
-    }
-#endif
-    
-    /* Build NUMA topology after detecting nodes */
-    init_numa_topology();
-}
-
-
-/* ============================================================================
- * System info
- * ============================================================================ */
-
-static void init_system_info(void) {
-    /* Get number of CPUs (POSIX, works on all platforms) */
-    g_num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (g_num_cpus < 1) g_num_cpus = 1;
-    
-    /* Get total memory (platform-specific methods) */
-    g_total_memory = 0;
-    
-#ifdef PLATFORM_LINUX
-    /* Linux: sysconf is reliable */
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (pages > 0 && page_size > 0) {
-        g_total_memory = (size_t)pages * (size_t)page_size;
-    }
-#endif
-
-#ifdef PLATFORM_MACOS
-    /* macOS: use sysctl hw.memsize */
-    int64_t memsize = 0;
-    size_t len = sizeof(memsize);
-    if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) == 0 && memsize > 0) {
-        g_total_memory = (size_t)memsize;
-    }
-#endif
-
-#ifdef PLATFORM_BSD
-    /* BSD: try hw.physmem or hw.realmem */
-    unsigned long physmem = 0;
-    size_t len = sizeof(physmem);
-    if (sysctlbyname("hw.physmem", &physmem, &len, NULL, 0) == 0 && physmem > 0) {
-        g_total_memory = (size_t)physmem;
-    } else {
-        /* Fallback to sysconf */
-        long pages = sysconf(_SC_PHYS_PAGES);
-        long page_size = sysconf(_SC_PAGESIZE);
-        if (pages > 0 && page_size > 0) {
-            g_total_memory = (size_t)pages * (size_t)page_size;
-        }
-    }
-#endif
-
-    /* Fallback if detection failed */
-    if (g_total_memory == 0) {
-        long pages = sysconf(_SC_PHYS_PAGES);
-        long page_size = sysconf(_SC_PAGESIZE);
-        if (pages > 0 && page_size > 0) {
-            g_total_memory = (size_t)pages * (size_t)page_size;
-        } else {
-            g_total_memory = 1024UL * 1024 * 1024;  /* Default 1GB */
-        }
-    }
-    
-    if (g_verbose) {
-        fprintf(stderr, "System: %d CPUs, %.2f GB memory\n", 
-                g_num_cpus, g_total_memory / (1024.0 * 1024 * 1024));
-    }
-    
-    /* Detect cache topology (must be called after g_num_cpus is set) */
-    init_cache_info();
-}
-
-/* ============================================================================
  * OpenMP Bandwidth Benchmark
  * ============================================================================ */
 
-/* 
+/*
  * Run bandwidth benchmark using OpenMP.
- * 
+ *
  * Key features:
  * - proc_bind(spread) distributes threads across NUMA nodes
  * - Per-thread NUMA-local buffer allocation
@@ -1243,14 +707,14 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
     result.size = size;
     result.op = op;
     result.threads = nthreads;
-    
+
     /* Allocate arrays for per-thread buffers and results */
     void **src_bufs = calloc(nthreads, sizeof(void*));
     void **dst_bufs = calloc(nthreads, sizeof(void*));
     double *thread_elapsed = calloc(nthreads, sizeof(double));
     uint64_t *thread_checksums = calloc(nthreads, sizeof(uint64_t));
     int alloc_failed = 0;
-    
+
     if (!src_bufs || !dst_bufs || !thread_elapsed || !thread_checksums) {
         free(src_bufs);
         free(dst_bufs);
@@ -1258,17 +722,17 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         free(thread_checksums);
         return result;
     }
-    
+
     /* Set OpenMP thread count */
     omp_set_num_threads(nthreads);
-    
+
     /* Phase 1: Parallel allocation with NUMA awareness
      * proc_bind(spread) distributes threads across NUMA nodes,
      * then each thread allocates memory locally */
     #pragma omp parallel proc_bind(spread)
     {
         int tid = omp_get_thread_num();
-        
+
 #ifdef USE_NUMA
         /* Get current CPU and its NUMA node (OpenMP has placed us optimally) */
         if (numa_available() >= 0) {
@@ -1283,7 +747,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
             }
         }
 #endif
-        
+
         /* Fallback: regular allocation if NUMA not available or failed */
         if (!src_bufs[tid]) {
             src_bufs[tid] = alloc_buffer(size);
@@ -1291,13 +755,13 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         if (op == OP_COPY && !dst_bufs[tid]) {
             dst_bufs[tid] = alloc_buffer(size);
         }
-        
+
         /* Check allocation success */
         if (!src_bufs[tid] || (op == OP_COPY && !dst_bufs[tid])) {
             #pragma omp atomic write
             alloc_failed = 1;
         }
-        
+
         /* Initialize buffer (first-touch for NUMA) */
         if (src_bufs[tid]) {
             memset(src_bufs[tid], 0xAA, size);
@@ -1306,7 +770,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
             memset(dst_bufs[tid], 0, size);
         }
     }
-    
+
     if (alloc_failed) {
         /* Cleanup on allocation failure */
         for (int i = 0; i < nthreads; i++) {
@@ -1330,13 +794,13 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         }
         return result;
     }
-    
+
     /* Phase 2: Calibration - estimate iterations needed */
     int iterations = MIN_ITERATIONS;
     {
         /* Warmup */
         g_sink += mem_read(src_bufs[0], size);
-        
+
         /* Time single iteration */
         double t_start = get_time();
         switch (op) {
@@ -1353,7 +817,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
                 break;
         }
         double time_per_iter = get_time() - t_start;
-        
+
         if (time_per_iter > 1e-9) {
             iterations = (int)(TARGET_TIME_PER_TEST / time_per_iter);
             if (iterations < MIN_ITERATIONS) iterations = MIN_ITERATIONS;
@@ -1361,7 +825,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         }
     }
     result.iterations = iterations;
-    
+
     /* Phase 3: Timed measurement with all threads
      * OpenMP implicit barrier ensures all threads start together */
     #pragma omp parallel proc_bind(spread)
@@ -1370,11 +834,11 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         void *src = src_bufs[tid];
         void *dst = dst_bufs[tid];
         uint64_t checksum = 0;
-        
+
         /* Implicit barrier here - all threads synchronized */
-        
+
         double t_start = get_time();
-        
+
         switch (op) {
             case OP_READ:
                 for (int i = 0; i < iterations; i++) {
@@ -1394,13 +858,13 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
             default:
                 break;
         }
-        
+
         double t_end = get_time();
-        
+
         thread_elapsed[tid] = t_end - t_start;
         thread_checksums[tid] = checksum;
     }
-    
+
     /* Find max elapsed time (determines overall bandwidth) */
     double max_elapsed = 0;
     uint64_t total_checksum = 0;
@@ -1410,10 +874,10 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         }
         total_checksum ^= thread_checksums[i];
     }
-    
+
     g_sink += total_checksum;
     result.elapsed_s = max_elapsed;
-    
+
     /* Calculate bandwidth = (size per thread * threads * iterations) / time
      * This gives aggregate bandwidth across all threads.
      * Note: for copy, we report buffer size (not 2x) to match bw_mem convention */
@@ -1421,7 +885,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         size_t bytes_transferred = (size_t)size * nthreads * iterations;
         result.bandwidth_mb_s = (bytes_transferred / (1024.0 * 1024.0)) / max_elapsed;
     }
-    
+
     /* Cleanup */
     for (int i = 0; i < nthreads; i++) {
 #ifdef USE_NUMA
@@ -1439,7 +903,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
     free(dst_bufs);
     free(thread_elapsed);
     free(thread_checksums);
-    
+
     return result;
 }
 
@@ -1449,22 +913,22 @@ static result_t run_benchmark_single(size_t size, operation_t op) {
     result.size = size;
     result.op = op;
     result.threads = 1;
-    
+
     void *src = alloc_buffer(size);
     void *dst = (op == OP_COPY) ? alloc_buffer(size) : NULL;
-    
+
     if (!src || (op == OP_COPY && !dst)) {
         free_buffer(src, size);
         free_buffer(dst, size);
         return result;
     }
-    
+
     memset(src, 0xAA, size);
     if (dst) memset(dst, 0, size);
-    
+
     /* Warmup */
     g_sink += mem_read(src, size);
-    
+
     /* Calibrate */
     double t_start = get_time();
     switch (op) {
@@ -1474,7 +938,7 @@ static result_t run_benchmark_single(size_t size, operation_t op) {
         default: break;
     }
     double time_per_iter = get_time() - t_start;
-    
+
     int iterations = MIN_ITERATIONS;
     if (time_per_iter > 1e-9) {
         iterations = (int)(TARGET_TIME_PER_TEST / time_per_iter);
@@ -1482,11 +946,11 @@ static result_t run_benchmark_single(size_t size, operation_t op) {
         if (iterations > MAX_ITERATIONS) iterations = MAX_ITERATIONS;
     }
     result.iterations = iterations;
-    
+
     /* Timed run */
     uint64_t checksum = 0;
     t_start = get_time();
-    
+
     switch (op) {
         case OP_READ:
             for (int i = 0; i < iterations; i++) {
@@ -1506,20 +970,20 @@ static result_t run_benchmark_single(size_t size, operation_t op) {
         default:
             break;
     }
-    
+
     double elapsed = get_time() - t_start;
-    
+
     g_sink += checksum;
     result.elapsed_s = elapsed;
-    
+
     if (elapsed > 0) {
         size_t bytes_transferred = size * iterations;
         result.bandwidth_mb_s = (bytes_transferred / (1024.0 * 1024.0)) / elapsed;
     }
-    
+
     free_buffer(src, size);
     free_buffer(dst, size);
-    
+
     return result;
 }
 
@@ -1534,21 +998,21 @@ static result_t run_benchmark(size_t size, operation_t op, int nthreads) {
 /* Run benchmark multiple times and return best result (like lmbench TRIES)
  * For bandwidth: best = highest bandwidth
  * For latency: best = lowest latency
- * 
+ *
  * First run is a warmup (discarded) to allow CPU frequency to ramp up
  * and caches to warm. This dramatically reduces result variability.
  */
 static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
     result_t best = {0};
-    
+
     /* Warmup run - discarded.
      * This allows: CPU to reach turbo frequency, caches to warm,
      * thread scheduling to stabilize. Critical for consistent results. */
     (void)run_benchmark(size, op, nthreads);
-    
+
     for (int try = 0; try < g_benchmark_tries; try++) {
         result_t r = run_benchmark(size, op, nthreads);
-        
+
         if (try == 0) {
             best = r;
         } else {
@@ -1565,7 +1029,7 @@ static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
             }
         }
     }
-    
+
     return best;
 }
 
@@ -1574,12 +1038,12 @@ static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
  * ============================================================================ */
 
 /* Generate thread counts dynamically based on CPU count (for auto-scaling mode)
- * 
+ *
  * Strategy:
  * - Powers of 2 from 1 up to nproc
  * - Always include nproc itself (if not already a power of 2)
  * - No oversubscription (causes unreliable results)
- * 
+ *
  * Examples:
  *   4 cores:   1, 2, 4               (3 values)
  *   32 cores:  1, 2, 4, 8, 16, 32    (6 values)
@@ -1588,32 +1052,32 @@ static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
 static int* get_thread_counts(int *count) {
     int nproc = g_num_cpus;
     if (nproc < 1) nproc = 1;
-    
+
     /* Cap at nproc - oversubscription causes unreliable benchmark results
      * due to context switching, cache thrashing, and scheduler interference */
     int max_threads = nproc;
-    
+
     /* Allocate more than enough space */
     int *tc = malloc(32 * sizeof(int));
     int n = 0;
-    
+
     /* Add powers of 2 up to nproc */
     for (int t = 1; t <= max_threads; t *= 2) {
         tc[n++] = t;
     }
-    
+
     /* Add nproc if not already in list (i.e., not a power of 2) */
     if (tc[n-1] != nproc) {
         tc[n++] = nproc;
     }
-    
+
     tc[n] = 0;  /* Sentinel */
     *count = n;
     return tc;
 }
 
 /* Get sizes to test (per-thread buffer sizes) - adaptive based on cache hierarchy
- * 
+ *
  * Generates sizes at critical cache transition points to show:
  * 1. Pure L1 performance
  * 2. L1→L2 transition
@@ -1621,58 +1085,58 @@ static int* get_thread_counts(int *count) {
  * 4. L2→L3 transition
  * 5. L3 region
  * 6. Pure RAM bandwidth
- * 
+ *
  * All sizes are strictly increasing with no overlaps.
  */
 static size_t* get_sizes(int *count) {
     int nthreads = g_explicit_threads > 0 ? g_explicit_threads : g_num_cpus;
     if (nthreads < 1) nthreads = 1;
-    
+
     /* Use detected cache sizes, with sensible defaults */
     size_t l1 = g_l1_cache_size > 0 ? g_l1_cache_size : 32768;      /* 32 KB */
     size_t l2 = g_l2_cache_size > 0 ? g_l2_cache_size : 262144;     /* 256 KB */
     size_t l3 = g_l3_cache_size > 0 ? g_l3_cache_size : 8388608;    /* 8 MB */
-    
+
     /* Memory limit per thread */
     size_t max_size = g_total_memory / 2 / nthreads;
-    
+
     /* Build strictly increasing size sequence */
     size_t sizes_list[20];
     int n = 0;
     size_t prev = 0;
-    
+
     /* Helper macro to add size if > prev and <= max_size */
     #define ADD_SIZE(sz) do { \
         size_t _s = round_to_power_of_2(sz); \
         if (_s > prev && _s <= max_size) { sizes_list[n++] = _s; prev = _s; } \
     } while(0)
-    
+
     /* L1 region */
     ADD_SIZE(l1 / 2);
-    
+
     /* L1→L2 transition */
     ADD_SIZE(l1 * 2);
-    
+
     /* L2 region */
     ADD_SIZE(l2 / 2);
     ADD_SIZE(l2);
-    
+
     /* L2→L3 transition */
     ADD_SIZE(l2 * 2);
-    
+
     /* L3 region */
     if (l3 > l2 * 4) {
         ADD_SIZE(l3 / 4);
     }
     ADD_SIZE(l3 / 2);
-    
+
     /* L3→RAM transition */
     ADD_SIZE(l3);
-    
+
     /* RAM region */
     ADD_SIZE(l3 * 2);
     ADD_SIZE(l3 * 4);
-    
+
     /* Full sweep: add larger sizes up to memory limit */
     if (g_full_sweep) {
         size_t ram_size = RAM_SIZE_2 * 2;
@@ -1681,14 +1145,14 @@ static size_t* get_sizes(int *count) {
             ram_size *= 2;
         }
     }
-    
+
     #undef ADD_SIZE
-    
+
     /* Ensure at least one size */
     if (n == 0) {
         sizes_list[n++] = 4096;
     }
-    
+
     /* Copy to result array */
     size_t *sizes = malloc((n + 1) * sizeof(size_t));
     for (int i = 0; i < n; i++) {
@@ -1701,9 +1165,9 @@ static size_t* get_sizes(int *count) {
 
 static void print_csv_header(void) {
     if (g_human_readable) {
-        printf("\n%-10s %-8s %12s %12s %8s\n", 
+        printf("\n%-10s %-8s %12s %12s %8s\n",
                "Size", "Op", "Bandwidth", "Latency", "Threads");
-        printf("%-10s %-8s %12s %12s %8s\n", 
+        printf("%-10s %-8s %12s %12s %8s\n",
                "----", "--", "---------", "-------", "-------");
     } else {
         printf("size_kb,operation,bandwidth_mb_s,latency_ns,latency_stddev_ns,latency_samples,threads,iterations,elapsed_s\n");
@@ -1712,11 +1176,11 @@ static void print_csv_header(void) {
 
 static void print_result(const result_t *r) {
     size_t size_kb = r->size / 1024;
-    
+
     if (g_human_readable) {
         char size_buf[32], bw_buf[32];
         format_size(size_kb, size_buf, sizeof(size_buf));
-        
+
         if (r->op == OP_LATENCY) {
             printf("%-10s %-8s %12s %9.1f ns %8d\n",
                    size_buf, OP_NAMES[r->op], "-", r->latency_ns, r->threads);
@@ -1732,7 +1196,7 @@ static void print_result(const result_t *r) {
              * StdDev indicates measurement precision
              * Sample count shows measurement effort */
             printf("%zu,%s,0,%.2f,%.2f,%d,%d,%d,%.6f\n",
-                   size_kb, OP_NAMES[r->op], r->latency_ns, 
+                   size_kb, OP_NAMES[r->op], r->latency_ns,
                    r->latency_stddev_ns, r->latency_samples,
                    r->threads, r->iterations, r->elapsed_s);
         } else {
@@ -1748,12 +1212,12 @@ static void print_result(const result_t *r) {
 static void update_summary(const result_t *r) {
     /* Weight by log2 of size - larger sizes get more weight */
     double weight = log2((double)r->size / 1024.0 + 1.0);
-    
+
     /* Track largest size tested */
     if (r->size > g_summary.largest_size_tested) {
         g_summary.largest_size_tested = r->size;
     }
-    
+
     switch (r->op) {
         case OP_READ:
             g_summary.read_count++;
@@ -1763,7 +1227,7 @@ static void update_summary(const result_t *r) {
             g_summary.read_bw_weighted_sum += r->bandwidth_mb_s * weight;
             g_summary.read_weight_sum += weight;
             break;
-            
+
         case OP_WRITE:
             g_summary.write_count++;
             if (r->bandwidth_mb_s > g_summary.peak_write_mb_s) {
@@ -1772,7 +1236,7 @@ static void update_summary(const result_t *r) {
             g_summary.write_bw_weighted_sum += r->bandwidth_mb_s * weight;
             g_summary.write_weight_sum += weight;
             break;
-            
+
         case OP_COPY:
             g_summary.copy_count++;
             if (r->bandwidth_mb_s > g_summary.peak_copy_mb_s) {
@@ -1781,7 +1245,7 @@ static void update_summary(const result_t *r) {
             g_summary.copy_bw_weighted_sum += r->bandwidth_mb_s * weight;
             g_summary.copy_weight_sum += weight;
             break;
-            
+
         case OP_LATENCY:
             g_summary.latency_count++;
             /* For latency, track the largest buffer size tested for the most RAM-like result */
@@ -1799,7 +1263,7 @@ static void print_summary(void) {
     fprintf(stderr, "================================================================================\n");
     fprintf(stderr, "                           BENCHMARK SUMMARY\n");
     fprintf(stderr, "================================================================================\n\n");
-    
+
     /* Calculate weighted averages */
     if (g_summary.read_weight_sum > 0) {
         g_summary.weighted_avg_read_mb_s = g_summary.read_bw_weighted_sum / g_summary.read_weight_sum;
@@ -1810,25 +1274,25 @@ static void print_summary(void) {
     if (g_summary.copy_weight_sum > 0) {
         g_summary.weighted_avg_copy_mb_s = g_summary.copy_bw_weighted_sum / g_summary.copy_weight_sum;
     }
-    
+
     /* Print bandwidth results */
     fprintf(stderr, "BANDWIDTH (MB/s):\n");
     fprintf(stderr, "  %-10s %12s %12s\n", "Operation", "Peak", "Weighted Avg");
     fprintf(stderr, "  %-10s %12s %12s\n", "---------", "----", "------------");
-    
+
     if (g_summary.read_count > 0) {
-        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Read", 
+        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Read",
                 g_summary.peak_read_mb_s, g_summary.weighted_avg_read_mb_s);
     }
     if (g_summary.write_count > 0) {
-        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Write", 
+        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Write",
                 g_summary.peak_write_mb_s, g_summary.weighted_avg_write_mb_s);
     }
     if (g_summary.copy_count > 0) {
-        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Copy", 
+        fprintf(stderr, "  %-10s %12.0f %12.0f\n", "Copy",
                 g_summary.peak_copy_mb_s, g_summary.weighted_avg_copy_mb_s);
     }
-    
+
     /* Print latency results */
     if (g_summary.latency_count > 0 && g_summary.best_latency_ns > 0) {
         fprintf(stderr, "\nLATENCY:\n");
@@ -1840,21 +1304,21 @@ static void print_summary(void) {
         } else {
             cache_note = " (RAM)";
         }
-        fprintf(stderr, "  Best latency: %.1f ns%s at %zu KB buffer\n", 
+        fprintf(stderr, "  Best latency: %.1f ns%s at %zu KB buffer\n",
                 g_summary.best_latency_ns, cache_note, g_summary.largest_size_tested / 1024);
     }
-    
+
     /* Calculate and print composite benchmark score
      * Score formula: geometric mean of bandwidth scores, divided by latency factor
      * Higher is better for all components */
     fprintf(stderr, "\n");
     fprintf(stderr, "--------------------------------------------------------------------------------\n");
     fprintf(stderr, "BENCHMARK SCORE (higher is better):\n\n");
-    
+
     /* Individual scores */
     double bw_total = 0;
     int bw_count = 0;
-    
+
     if (g_summary.peak_read_mb_s > 0) {
         bw_total += g_summary.peak_read_mb_s;
         bw_count++;
@@ -1867,21 +1331,21 @@ static void print_summary(void) {
         bw_total += g_summary.peak_copy_mb_s;
         bw_count++;
     }
-    
+
     /* Bandwidth score: average of peak bandwidths (in GB/s for nicer numbers) */
     double bw_score = 0;
     if (bw_count > 0) {
         bw_score = (bw_total / bw_count) / 1000.0;  /* Convert MB/s to GB/s */
         fprintf(stderr, "  Bandwidth Score:    %8.1f  (avg peak bandwidth in GB/s)\n", bw_score);
     }
-    
+
     /* Latency score: inverse of latency (higher = faster memory) */
     double latency_score = 0;
     if (g_summary.best_latency_ns > 0) {
         latency_score = 1000.0 / g_summary.best_latency_ns;  /* 1000/ns gives reasonable scale */
         fprintf(stderr, "  Latency Score:      %8.1f  (1000 / latency_ns)\n", latency_score);
     }
-    
+
     /* Combined score: geometric mean if both available, otherwise just bandwidth */
     double combined_score = 0;
     if (bw_score > 0 && latency_score > 0) {
@@ -1891,9 +1355,9 @@ static void print_summary(void) {
         combined_score = bw_score * 100;
         fprintf(stderr, "\n  >> COMBINED SCORE:  %8.0f  (bandwidth only, no latency data)\n", combined_score);
     }
-    
+
     fprintf(stderr, "--------------------------------------------------------------------------------\n");
-    
+
     /* Warn if options that affect score comparability were used */
     int has_warnings = 0;
     if (g_max_runtime > 0 || g_explicit_threads > 0 || g_single_size > 0) {
@@ -1904,12 +1368,12 @@ static void print_summary(void) {
             has_warnings = 1;
         }
         if (g_explicit_threads > 0) {
-            fprintf(stderr, "  - Fixed thread count (-p %d) instead of using all CPUs (%d)\n", 
+            fprintf(stderr, "  - Fixed thread count (-p %d) instead of using all CPUs (%d)\n",
                     g_explicit_threads, g_num_cpus);
             has_warnings = 1;
         }
         if (g_single_size > 0) {
-            fprintf(stderr, "  - Single buffer size (-s %zu KB) instead of full sweep\n", 
+            fprintf(stderr, "  - Single buffer size (-s %zu KB) instead of full sweep\n",
                     g_single_size / 1024);
             has_warnings = 1;
         }
@@ -1927,22 +1391,22 @@ static void print_summary(void) {
 #define MAX_LATENCY_SIZE (2UL * 1024 * 1024 * 1024)  /* 2 GB */
 
 /* Find best configuration for a given buffer size and operation.
- * 
+ *
  * This follows bw_mem's approach:
  * - buffer_size is the per-thread buffer size
  * - Total memory = buffer_size * threads (or buffer_size * threads * 2 for copy)
- * 
+ *
  * Three modes:
  * 1. Auto-scaling (g_auto_scaling=1): Try multiple thread counts, find best
  * 2. Explicit threads (g_explicit_threads>0): Use exactly that many threads
  * 3. Default (neither): Use num_cpus threads
  */
-static result_t find_best_config(size_t buffer_size, operation_t op, 
+static result_t find_best_config(size_t buffer_size, operation_t op,
                                  int *thread_counts, int tc_count) {
     result_t best = {0};
     best.size = buffer_size;
     best.op = op;
-    
+
     /* For latency test: single-thread, statistically valid measurement */
     if (op == OP_LATENCY) {
         size_t max_latency = MAX_LATENCY_SIZE;
@@ -1950,11 +1414,11 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
             max_latency = g_total_memory / 4;
         }
         size_t latency_size = (buffer_size > max_latency) ? max_latency : buffer_size;
-        
+
         double start = get_time();
         latency_stats_t stats = measure_latency_stats(latency_size);
         double elapsed = get_time() - start;
-        
+
         best.size = buffer_size;
         best.op = op;
         best.threads = 1;
@@ -1965,48 +1429,48 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
         best.latency_samples = stats.num_samples;
         best.elapsed_s = elapsed;
         best.iterations = stats.num_samples;
-        
+
         return best;
     }
-    
+
     /* Bandwidth tests */
     int nthreads;
-    
+
     if (g_auto_scaling) {
         /* Auto-scaling mode: try all thread counts, find best */
         for (int i = 0; i < tc_count; i++) {
             nthreads = thread_counts[i];
             if (nthreads < 1) continue;
-            
+
             int bufs_per_op = (op == OP_COPY) ? 2 : 1;
             size_t memory_needed = buffer_size * nthreads * bufs_per_op;
             if (memory_needed > g_total_memory / 4) {
                 continue;
             }
-            
+
             result_t r = run_benchmark_best(buffer_size, op, nthreads);
             r.size = buffer_size;
-            
+
             if (r.bandwidth_mb_s > best.bandwidth_mb_s) {
                 best = r;
             }
         }
-        
+
         if (best.bandwidth_mb_s == 0) {
             best = run_benchmark_best(buffer_size, op, 1);
             best.size = buffer_size;
         }
-        
+
         return best;
     }
-    
+
     /* Fixed thread count mode */
     if (g_explicit_threads > 0) {
         nthreads = g_explicit_threads;
     } else {
         nthreads = g_num_cpus;
     }
-    
+
     /* Check memory limit and reduce threads if needed */
     int bufs_per_op = (op == OP_COPY) ? 2 : 1;
     size_t memory_needed = buffer_size * nthreads * bufs_per_op;
@@ -2014,57 +1478,57 @@ static result_t find_best_config(size_t buffer_size, operation_t op,
         nthreads /= 2;
         memory_needed = buffer_size * nthreads * bufs_per_op;
     }
-    
+
     best = run_benchmark_best(buffer_size, op, nthreads);
     best.size = buffer_size;
-    
+
     return best;
 }
 
 static void run_all_benchmarks(void) {
     double start_time = get_time();
-    
+
     int tc_count;
     int *thread_counts = get_thread_counts(&tc_count);
-    
+
     /* Single size mode */
     if (g_single_size > 0) {
         if (g_verbose) {
             fprintf(stderr, "Testing buffer size: %zu KB per thread\n",
                     g_single_size / 1024);
         }
-        
+
         print_csv_header();
-        
+
         for (int op = 0; op < 4 && g_running; op++) {
             if (!(g_ops_mask & (1 << op))) continue;
-            
-            result_t best = find_best_config(g_single_size, (operation_t)op, 
+
+            result_t best = find_best_config(g_single_size, (operation_t)op,
                                             thread_counts, tc_count);
-            
+
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
                 print_result(&best);
                 if (g_human_readable) update_summary(&best);
                 fflush(stdout);
             }
         }
-        
+
         free(thread_counts);
-        
+
         if (g_verbose) {
             double total = get_time() - start_time;
             fprintf(stderr, "Total runtime: %.1f seconds\n", total);
         }
-        
+
         /* Print summary in human-readable mode */
         if (g_human_readable) print_summary();
         return;
     }
-    
+
     /* Normal mode: test all sizes */
     int size_count;
     size_t *sizes = get_sizes(&size_count);
-    
+
     if (g_verbose) {
         fprintf(stderr, "Testing %d buffer sizes (per thread, adaptive to cache hierarchy)\n", size_count);
         if (g_auto_scaling) {
@@ -2076,24 +1540,24 @@ static void run_all_benchmarks(void) {
         }
         fprintf(stderr, "OpenMP: proc_bind(spread) for NUMA-aware thread placement\n");
     }
-    
+
     print_csv_header();
-    
+
     for (int s = 0; s < size_count && g_running; s++) {
         size_t size = sizes[s];
-        
+
         for (int op = 0; op < 4 && g_running; op++) {
             if (!(g_ops_mask & (1 << op))) continue;
-            
-            result_t best = find_best_config(size, (operation_t)op, 
+
+            result_t best = find_best_config(size, (operation_t)op,
                                              thread_counts, tc_count);
-            
+
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
                 print_result(&best);
                 if (g_human_readable) update_summary(&best);
                 fflush(stdout);
             }
-            
+
             if (g_max_runtime > 0) {
                 double elapsed = get_time() - start_time;
                 if (elapsed > g_max_runtime) {
@@ -2106,15 +1570,15 @@ static void run_all_benchmarks(void) {
             }
         }
     }
-    
+
     free(sizes);
     free(thread_counts);
-    
+
     if (g_verbose) {
         double total = get_time() - start_time;
         fprintf(stderr, "Total runtime: %.1f seconds\n", total);
     }
-    
+
     /* Print summary in human-readable mode */
     if (g_human_readable) print_summary();
 }
@@ -2174,7 +1638,7 @@ static void usage(const char *prog) {
 int main(int argc, char *argv[]) {
     int opt;
     int ops_specified = 0;  /* Track if -o was used */
-    
+
     while ((opt = getopt(argc, argv, "hvfas:t:r:p:o:VHR")) != -1) {
         switch (opt) {
             case 'h':
@@ -2251,17 +1715,17 @@ int main(int argc, char *argv[]) {
                 return 1;
         }
     }
-    
+
     /* Initialize */
     srand((unsigned int)time(NULL));  /* Seed RNG for pointer chain randomization */
     init_system_info();
     init_numa();
-    
+
     /* Run benchmarks */
     run_all_benchmarks();
-    
+
     /* Cleanup */
     cleanup_hwloc();
-    
+
     return 0;
 }
