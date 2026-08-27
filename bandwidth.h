@@ -288,33 +288,42 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
     }
 
     /* Phase 2: Calibration - estimate iterations needed */
-    int iterations = MIN_ITERATIONS;
+    #pragma omp parallel proc_bind(spread)
     {
-        /* Warmup */
-        g_sink += mem_read(src_bufs[0], size);
+        int tid = omp_get_thread_num();
+        void *src = src_bufs[tid];
+        void *dst = dst_bufs[tid];
+        uint64_t checksum = mem_read(src, size);
 
-        /* Time single iteration */
         double t_start = get_time();
         switch (op) {
             case OP_READ:
-                g_sink += mem_read(src_bufs[0], size);
+                checksum ^= mem_read(src, size);
                 break;
             case OP_WRITE:
-                mem_write(src_bufs[0], size, 0x1234567890ABCDEFULL);
+                mem_write(src, size, 0x1234567890ABCDEFULL);
                 break;
             case OP_COPY:
-                mem_copy(dst_bufs[0], src_bufs[0], size);
+                mem_copy(dst, src, size);
                 break;
             default:
                 break;
         }
-        double time_per_iter = get_time() - t_start;
+        thread_elapsed[tid] = get_time() - t_start;
+        thread_checksums[tid] = checksum;
+    }
 
-        if (time_per_iter > 1e-9) {
-            iterations = (int)(TARGET_TIME_PER_TEST / time_per_iter);
-            if (iterations < MIN_ITERATIONS) iterations = MIN_ITERATIONS;
-            if (iterations > MAX_ITERATIONS) iterations = MAX_ITERATIONS;
-        }
+    double time_per_iter = 0;
+    for (int i = 0; i < nthreads; i++) {
+        if (thread_elapsed[i] > time_per_iter) time_per_iter = thread_elapsed[i];
+        g_sink += thread_checksums[i];
+    }
+
+    int iterations = MIN_ITERATIONS;
+    if (time_per_iter > 1e-9) {
+        iterations = (int)(TARGET_TIME_PER_TEST / time_per_iter);
+        if (iterations < MIN_ITERATIONS) iterations = MIN_ITERATIONS;
+        if (iterations > MAX_ITERATIONS) iterations = MAX_ITERATIONS;
     }
     result.iterations = iterations;
 
