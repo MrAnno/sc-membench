@@ -430,7 +430,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
     return result;
 }
 
-/* Run single-threaded benchmark (for small buffers or latency) */
+/* Run single-threaded benchmark (for small buffers) */
 static result_t run_benchmark_single(size_t size, operation_t op) {
     result_t result = {0};
     result.size = size;
@@ -518,9 +518,8 @@ static result_t run_benchmark(size_t size, operation_t op, int nthreads) {
     return run_benchmark_omp(size, op, nthreads);
 }
 
-/* Run benchmark multiple times and return best result (like lmbench TRIES)
- * For bandwidth: best = highest bandwidth
- * For latency: best = lowest latency
+/* Run benchmark multiple times and return the best (highest bandwidth) result,
+ * like lmbench TRIES.
  *
  * First run is a warmup (discarded) to allow CPU frequency to ramp up
  * and caches to warm. This dramatically reduces result variability.
@@ -536,20 +535,8 @@ static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
     for (int try = 0; try < g_benchmark_tries; try++) {
         result_t r = run_benchmark(size, op, nthreads);
 
-        if (try == 0) {
+        if (try == 0 || r.bandwidth_mb_s > best.bandwidth_mb_s) {
             best = r;
-        } else {
-            if (op == OP_LATENCY) {
-                /* For latency: lower is better */
-                if (r.latency_ns > 0 && r.latency_ns < best.latency_ns) {
-                    best = r;
-                }
-            } else {
-                /* For bandwidth: higher is better */
-                if (r.bandwidth_mb_s > best.bandwidth_mb_s) {
-                    best = r;
-                }
-            }
         }
     }
 
