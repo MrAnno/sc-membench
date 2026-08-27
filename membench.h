@@ -53,5 +53,9 @@ typedef struct {
 extern int g_verbose;        /* 0=quiet, 1=summary, 2=detailed */
 extern int g_use_hugepages;
 extern int g_benchmark_tries;
+extern int g_human_readable;
+extern int g_explicit_threads;
+extern double g_max_runtime;
+extern size_t g_single_size;
 
 #endif /* MEMBENCH_H */
