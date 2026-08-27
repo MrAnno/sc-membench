@@ -18,12 +18,6 @@
 #include "platform.h"
 #include "utils.h"
 
-/* Optional library: NUMA support (Linux only) */
-#ifdef USE_NUMA
-#include <numa.h>
-#include <numaif.h>
-#endif
-
 /* ============================================================================
  * Memory operations
  * ============================================================================ */
@@ -257,26 +251,8 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
     {
         int tid = omp_get_thread_num();
 
-#ifdef USE_NUMA
-        /* Get current CPU and its NUMA node (OpenMP has placed us optimally) */
-        if (numa_available() >= 0) {
-            int cpu = sched_getcpu();
-            int node = numa_node_of_cpu(cpu);
-            if (node >= 0) {
-                /* Allocate on local NUMA node */
-                src_bufs[tid] = numa_alloc_onnode(size, node);
-                if (op == OP_COPY) {
-                    dst_bufs[tid] = numa_alloc_onnode(size, node);
-                }
-            }
-        }
-#endif
-
-        /* Fallback: regular allocation if NUMA not available or failed */
-        if (!src_bufs[tid]) {
-            src_bufs[tid] = alloc_buffer(cfg, size);
-        }
-        if (op == OP_COPY && !dst_bufs[tid]) {
+        src_bufs[tid] = alloc_buffer(cfg, size);
+        if (op == OP_COPY) {
             dst_bufs[tid] = alloc_buffer(cfg, size);
         }
 
@@ -298,16 +274,8 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
     if (alloc_failed) {
         /* Cleanup on allocation failure */
         for (int i = 0; i < nthreads; i++) {
-#ifdef USE_NUMA
-            if (numa_available() >= 0) {
-                if (src_bufs[i]) numa_free(src_bufs[i], size);
-                if (dst_bufs[i]) numa_free(dst_bufs[i], size);
-            } else
-#endif
-            {
-                free_buffer(src_bufs[i], size);
-                free_buffer(dst_bufs[i], size);
-            }
+            free_buffer(src_bufs[i], size);
+            free_buffer(dst_bufs[i], size);
         }
         free(src_bufs);
         free(dst_bufs);
@@ -412,16 +380,8 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
 
     /* Cleanup */
     for (int i = 0; i < nthreads; i++) {
-#ifdef USE_NUMA
-        if (numa_available() >= 0) {
-            if (src_bufs[i]) numa_free(src_bufs[i], size);
-            if (dst_bufs[i]) numa_free(dst_bufs[i], size);
-        } else
-#endif
-        {
-            free_buffer(src_bufs[i], size);
-            free_buffer(dst_bufs[i], size);
-        }
+        free_buffer(src_bufs[i], size);
+        free_buffer(dst_bufs[i], size);
     }
     free(src_bufs);
     free(dst_bufs);
