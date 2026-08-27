@@ -52,5 +52,6 @@ typedef struct {
 
 extern int g_verbose;        /* 0=quiet, 1=summary, 2=detailed */
 extern int g_use_hugepages;
+extern int g_benchmark_tries;
 
 #endif /* MEMBENCH_H */
