@@ -126,6 +126,12 @@ void mem_copy(void *dst, const void *src, size_t size) {
  * Memory allocation
  * ============================================================================ */
 
+static size_t buffer_map_size(const bench_config_t *cfg, size_t size) {
+    if (!cfg->use_hugepages || size < get_huge_page_threshold()) return size;
+    size_t hp_size = get_huge_page_size();
+    return (size + hp_size - 1) & ~(hp_size - 1);
+}
+
 static void* alloc_buffer(const bench_config_t *cfg, size_t size) {
     void *buf = MAP_FAILED;
     int try_hugepages = cfg->use_hugepages && (size >= get_huge_page_threshold());
@@ -142,9 +148,8 @@ static void* alloc_buffer(const bench_config_t *cfg, size_t size) {
          */
 
 #ifdef MAP_HUGETLB
-        /* Round up size to huge page boundary for explicit huge pages */
         size_t hp_size = get_huge_page_size();
-        size_t aligned_size = (size + hp_size - 1) & ~(hp_size - 1);
+        size_t aligned_size = buffer_map_size(cfg, size);
 
         /* Try explicit huge pages (uses pre-allocated pool if available) */
         buf = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
@@ -162,23 +167,23 @@ static void* alloc_buffer(const bench_config_t *cfg, size_t size) {
 #endif
 
         /* Use mmap + madvise for Transparent Huge Pages (no pre-allocation needed) */
-        buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
+        buf = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (buf != MAP_FAILED) {
 #ifdef MADV_HUGEPAGE
             /* Hint to kernel: please use huge pages for this region.
              * The kernel will use THP if available and beneficial.
              * This doesn't require root or pre-allocation. */
-            if (madvise(buf, size, MADV_HUGEPAGE) == 0) {
+            if (madvise(buf, aligned_size, MADV_HUGEPAGE) == 0) {
                 if (cfg->verbose >= 2) {
-                    fprintf(stderr, "  Allocated %zu bytes with THP (transparent huge pages)\n", size);
+                    fprintf(stderr, "  Allocated %zu bytes with THP (transparent huge pages)\n", aligned_size);
                 }
             } else if (cfg->verbose >= 2) {
-                fprintf(stderr, "  Allocated %zu bytes (THP hint failed, using regular pages)\n", size);
+                fprintf(stderr, "  Allocated %zu bytes (THP hint failed, using regular pages)\n", aligned_size);
             }
 #else
             if (cfg->verbose >= 2) {
-                fprintf(stderr, "  Allocated %zu bytes (THP not available on this system)\n", size);
+                fprintf(stderr, "  Allocated %zu bytes (THP not available on this system)\n", aligned_size);
             }
 #endif
             /* Touch all pages to ensure they're allocated */
@@ -201,9 +206,9 @@ static void* alloc_buffer(const bench_config_t *cfg, size_t size) {
     return buf;
 }
 
-static void free_buffer(void *buf, size_t size) {
+static void free_buffer(const bench_config_t *cfg, void *buf, size_t size) {
     if (buf) {
-        munmap(buf, size);
+        munmap(buf, buffer_map_size(cfg, size));
     }
 }
 
@@ -274,8 +279,8 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
     if (alloc_failed) {
         /* Cleanup on allocation failure */
         for (int i = 0; i < nthreads; i++) {
-            free_buffer(src_bufs[i], size);
-            free_buffer(dst_bufs[i], size);
+            free_buffer(cfg, src_bufs[i], size);
+            free_buffer(cfg, dst_bufs[i], size);
         }
         free(src_bufs);
         free(dst_bufs);
@@ -389,8 +394,8 @@ static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operat
 
     /* Cleanup */
     for (int i = 0; i < nthreads; i++) {
-        free_buffer(src_bufs[i], size);
-        free_buffer(dst_bufs[i], size);
+        free_buffer(cfg, src_bufs[i], size);
+        free_buffer(cfg, dst_bufs[i], size);
     }
     free(src_bufs);
     free(dst_bufs);
@@ -411,8 +416,8 @@ static result_t run_benchmark_single(const bench_config_t *cfg, size_t size, ope
     void *dst = (op == OP_COPY) ? alloc_buffer(cfg, size) : NULL;
 
     if (!src || (op == OP_COPY && !dst)) {
-        free_buffer(src, size);
-        free_buffer(dst, size);
+        free_buffer(cfg, src, size);
+        free_buffer(cfg, dst, size);
         return result;
     }
 
@@ -474,8 +479,8 @@ static result_t run_benchmark_single(const bench_config_t *cfg, size_t size, ope
         result.bandwidth_mb_s = (bytes_transferred / (1024.0 * 1024.0)) / elapsed;
     }
 
-    free_buffer(src, size);
-    free_buffer(dst, size);
+    free_buffer(cfg, src, size);
+    free_buffer(cfg, dst, size);
 
     return result;
 }
