@@ -57,5 +57,8 @@ extern int g_human_readable;
 extern int g_explicit_threads;
 extern double g_max_runtime;
 extern size_t g_single_size;
+extern int g_full_sweep;
+extern int g_auto_scaling;
+extern int g_ops_mask;
 
 #endif /* MEMBENCH_H */
