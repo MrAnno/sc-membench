@@ -168,23 +168,6 @@ static inline LatencyNode* init_latency_chain(const platform_info_t *pi, const b
     return start;
 }
 
-/* Free latency chain - need base address and size */
-static inline void free_latency_chain(LatencyNode *start, size_t num_nodes, size_t alloc_size) {
-    if (!start || num_nodes == 0) return;
-
-    /* Find the lowest address in the chain (that's where mmap'd block starts) */
-    LatencyNode *min_addr = start;
-    LatencyNode *node = start->next;
-    size_t visited = 1;
-    while (node != start && visited < num_nodes) {
-        if (node < min_addr) min_addr = node;
-        node = node->next;
-        visited++;
-    }
-
-    free_latency_memory(min_addr, alloc_size);
-}
-
 /* Chase through linked list - each load depends on previous
  * Returns final node pointer to prevent optimization */
 static inline __attribute__((always_inline))
@@ -333,7 +316,7 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
     stats.total_accesses = total_accesses;
 
     /* Cleanup */
-    free_latency_chain(start, num_nodes, alloc_size);
+    free_latency_memory(start, alloc_size);
     restore_thread_affinity(&affinity);
 
     return stats;
