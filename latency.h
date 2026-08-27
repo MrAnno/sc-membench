@@ -173,7 +173,7 @@ static inline LatencyNode* init_latency_chain(const platform_info_t *pi, const b
 static inline __attribute__((always_inline))
 LatencyNode* chase_latency_chain(LatencyNode *start, size_t count) {
     LatencyNode *node = start;
-    volatile uint64_t sink = 0;  /* Prevent optimization */
+    uint64_t sink = 0;
 
     /* Unroll 8x to reduce loop overhead while maintaining dependency chain */
     size_t i = count;
