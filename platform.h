@@ -19,7 +19,6 @@
 
 #include <stddef.h>
 
-#include "membench.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -62,7 +61,8 @@ typedef struct {
 } platform_info_t;
 
 
-void platform_init(platform_info_t *pi);
+/* verbose: 0=quiet, 1=summary, 2=detailed (stderr) */
+void platform_init(platform_info_t *pi, int verbose);
 void platform_deinit(void);
 
 /* ============================================================================
@@ -139,7 +139,7 @@ static inline size_t get_huge_page_threshold(void) {
 
 /* Pin current thread to CPU 0 for consistent latency measurement.
  * Platform-specific implementations for Linux, macOS, and BSD. */
-static inline void pin_thread_to_cpu0(void) {
+static inline void pin_thread_to_cpu0(int verbose) {
     int success = 0;
 
 #ifdef PLATFORM_LINUX
@@ -167,7 +167,7 @@ static inline void pin_thread_to_cpu0(void) {
                                  THREAD_AFFINITY_POLICY_COUNT) == KERN_SUCCESS);
 #endif
 
-    if (g_verbose >= 2) {
+    if (verbose >= 2) {
         if (success) {
             fprintf(stderr, "  Latency thread pinned to CPU 0\n");
         } else {

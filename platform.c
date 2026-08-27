@@ -33,7 +33,7 @@ static size_t g_min_total_size = 4096;  /* Default 4KB, updated after cache dete
 static hwloc_topology_t g_topology = NULL;
 
 /* Detect cache sizes using hwloc */
-static void init_cache_info(platform_info_t *pi) {
+static void init_cache_info(platform_info_t *pi, int verbose) {
     if (hwloc_topology_init(&g_topology) < 0) {
         goto use_defaults;
     }
@@ -78,7 +78,7 @@ static void init_cache_info(platform_info_t *pi) {
     if (pi->l3_cache_size > 0) {
         depth = hwloc_get_type_depth(g_topology, HWLOC_OBJ_L3CACHE);
         int num_l3 = hwloc_get_nbobjs_by_depth(g_topology, depth);
-        if (g_verbose && num_l3 > 1) {
+        if (verbose && num_l3 > 1) {
             fprintf(stderr, "Note: %d L3 caches detected (distributed across dies)\n", num_l3);
         }
     }
@@ -94,7 +94,7 @@ use_defaults:
      * This ensures all CPUs can participate with meaningful measurements. */
     g_min_total_size = 16384 * pi->num_cpus;  /* 16KB per thread minimum */
 
-    if (g_verbose) {
+    if (verbose) {
         fprintf(stderr, "Cache (hwloc): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
                 pi->l1_cache_size / 1024, pi->l2_cache_size / 1024, pi->l3_cache_size / 1024);
         fprintf(stderr, "Minimum total test size: %zu KB (16KB × %d CPUs)\n",
@@ -221,7 +221,7 @@ static void init_cache_info_bsd(platform_info_t *pi) {
 #endif /* PLATFORM_BSD */
 
 /* Platform-agnostic cache info initialization */
-static void init_cache_info(platform_info_t *pi) {
+static void init_cache_info(platform_info_t *pi, int verbose) {
     const char *method = "defaults";
 
 #ifdef PLATFORM_LINUX
@@ -248,7 +248,7 @@ static void init_cache_info(platform_info_t *pi) {
      * Use 16KB per thread × num_cpus so each thread has a reliable buffer size. */
     g_min_total_size = 16384 * pi->num_cpus;  /* 16KB per thread minimum */
 
-    if (g_verbose) {
+    if (verbose) {
         fprintf(stderr, "Cache (%s): L1d=%zuKB, L2=%zuKB, L3=%zuKB (per core)\n",
                 method, pi->l1_cache_size / 1024, pi->l2_cache_size / 1024,
                 pi->l3_cache_size / 1024);
@@ -267,7 +267,7 @@ static void cleanup_hwloc(void) {
  * NUMA support
  * ============================================================================ */
 
-static void init_numa_topology(const platform_info_t *pi) {
+static void init_numa_topology(const platform_info_t *pi, int verbose) {
     /* Initialize topology arrays */
     memset(g_cpus_per_node, 0, sizeof(g_cpus_per_node));
     memset(g_node_cpus, 0, sizeof(g_node_cpus));
@@ -285,16 +285,6 @@ static void init_numa_topology(const platform_info_t *pi) {
                 }
             }
         }
-
-        if (g_verbose) {
-            fprintf(stderr, "NUMA topology:\n");
-            for (int node = 0; node < pi->numa_nodes; node++) {
-                fprintf(stderr, "  Node %d: %d CPUs (first: %d, last: %d)\n",
-                        node, g_cpus_per_node[node],
-                        g_cpus_per_node[node] > 0 ? g_node_cpus[node][0] : -1,
-                        g_cpus_per_node[node] > 0 ? g_node_cpus[node][g_cpus_per_node[node]-1] : -1);
-            }
-        }
     } else
 #endif
     {
@@ -304,30 +294,41 @@ static void init_numa_topology(const platform_info_t *pi) {
         }
         g_cpus_per_node[0] = pi->num_cpus < MAX_CPUS_PER_NODE ? pi->num_cpus : MAX_CPUS_PER_NODE;
     }
+
+    /* numa_nodes > 1 only when libnuma is available and reports several nodes */
+    if (verbose && pi->numa_nodes > 1) {
+        fprintf(stderr, "NUMA topology:\n");
+        for (int node = 0; node < pi->numa_nodes; node++) {
+            fprintf(stderr, "  Node %d: %d CPUs (first: %d, last: %d)\n",
+                    node, g_cpus_per_node[node],
+                    g_cpus_per_node[node] > 0 ? g_node_cpus[node][0] : -1,
+                    g_cpus_per_node[node] > 0 ? g_node_cpus[node][g_cpus_per_node[node]-1] : -1);
+        }
+    }
 }
 
-static void init_numa(platform_info_t *pi) {
+static void init_numa(platform_info_t *pi, int verbose) {
 #ifdef USE_NUMA
     if (numa_available() >= 0) {
         pi->numa_nodes = numa_max_node() + 1;
-        if (g_verbose) {
+        if (verbose) {
             fprintf(stderr, "NUMA: %d nodes detected (libnuma enabled)\n", pi->numa_nodes);
         }
     } else {
         pi->numa_nodes = 1;
-        if (g_verbose) {
+        if (verbose) {
             fprintf(stderr, "NUMA: not available (libnuma enabled but no NUMA support)\n");
         }
     }
 #else
     pi->numa_nodes = 1;
-    if (g_verbose) {
+    if (verbose) {
         fprintf(stderr, "NUMA: disabled (compile with -DUSE_NUMA -lnuma to enable)\n");
     }
 #endif
 
     /* Build NUMA topology after detecting nodes */
-    init_numa_topology(pi);
+    init_numa_topology(pi, verbose);
 }
 
 
@@ -335,7 +336,7 @@ static void init_numa(platform_info_t *pi) {
  * System info
  * ============================================================================ */
 
-static void init_system_info(platform_info_t *pi) {
+static void init_system_info(platform_info_t *pi, int verbose) {
     /* Get number of CPUs (POSIX, works on all platforms) */
     pi->num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (pi->num_cpus < 1) pi->num_cpus = 1;
@@ -388,19 +389,19 @@ static void init_system_info(platform_info_t *pi) {
         }
     }
 
-    if (g_verbose) {
+    if (verbose) {
         fprintf(stderr, "System: %d CPUs, %.2f GB memory\n",
                 pi->num_cpus, pi->total_memory / (1024.0 * 1024 * 1024));
     }
 
     /* Detect cache topology (must be called after pi->num_cpus is set) */
-    init_cache_info(pi);
+    init_cache_info(pi, verbose);
 }
 
-void platform_init(platform_info_t *pi) {
+void platform_init(platform_info_t *pi, int verbose) {
     *pi = (platform_info_t){0};
-    init_system_info(pi);
-    init_numa(pi);
+    init_system_info(pi, verbose);
+    init_numa(pi, verbose);
 }
 
 void platform_deinit(void) {

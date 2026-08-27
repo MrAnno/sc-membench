@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "config.h"
 #include "membench.h"
 #include "platform.h"
 #include "utils.h"
@@ -48,8 +49,8 @@ typedef struct {
 
 static summary_t g_summary = {0};
 
-static void print_csv_header(void) {
-    if (g_human_readable) {
+static void print_csv_header(const bench_config_t *cfg) {
+    if (cfg->human_readable) {
         printf("\n%-10s %-8s %12s %12s %8s\n",
                "Size", "Op", "Bandwidth", "Latency", "Threads");
         printf("%-10s %-8s %12s %12s %8s\n",
@@ -59,10 +60,10 @@ static void print_csv_header(void) {
     }
 }
 
-static void print_result(const result_t *r) {
+static void print_result(const bench_config_t *cfg, const result_t *r) {
     size_t size_kb = r->size / 1024;
 
-    if (g_human_readable) {
+    if (cfg->human_readable) {
         char size_buf[32], bw_buf[32];
         format_size(size_kb, size_buf, sizeof(size_buf));
 
@@ -143,7 +144,7 @@ static void update_summary(const result_t *r) {
 }
 
 /* Print summary statistics */
-static void print_summary(const platform_info_t *pi) {
+static void print_summary(const platform_info_t *pi, const bench_config_t *cfg) {
     fprintf(stderr, "\n");
     fprintf(stderr, "================================================================================\n");
     fprintf(stderr, "                           BENCHMARK SUMMARY\n");
@@ -245,21 +246,21 @@ static void print_summary(const platform_info_t *pi) {
 
     /* Warn if options that affect score comparability were used */
     int has_warnings = 0;
-    if (g_max_runtime > 0 || g_explicit_threads > 0 || g_single_size > 0) {
+    if (cfg->max_runtime > 0 || cfg->explicit_threads > 0 || cfg->single_size > 0) {
         fprintf(stderr, "\n");
         fprintf(stderr, "WARNING: Scores may not be comparable due to non-default options:\n");
-        if (g_max_runtime > 0) {
-            fprintf(stderr, "  - Time limit (-t %.0f) may have prevented testing larger buffer sizes\n", g_max_runtime);
+        if (cfg->max_runtime > 0) {
+            fprintf(stderr, "  - Time limit (-t %.0f) may have prevented testing larger buffer sizes\n", cfg->max_runtime);
             has_warnings = 1;
         }
-        if (g_explicit_threads > 0) {
+        if (cfg->explicit_threads > 0) {
             fprintf(stderr, "  - Fixed thread count (-p %d) instead of using all CPUs (%d)\n",
-                    g_explicit_threads, pi->num_cpus);
+                    cfg->explicit_threads, pi->num_cpus);
             has_warnings = 1;
         }
-        if (g_single_size > 0) {
+        if (cfg->single_size > 0) {
             fprintf(stderr, "  - Single buffer size (-s %zu KB) instead of full sweep\n",
-                    g_single_size / 1024);
+                    cfg->single_size / 1024);
             has_warnings = 1;
         }
         if (has_warnings) {

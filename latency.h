@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "config.h"
 #include "membench.h"
 #include "platform.h"
 #include "utils.h"
@@ -74,13 +75,13 @@ static inline void shuffle_nodes(LatencyNode **nodes, size_t n) {
 
 /* Allocate memory for latency chain with NUMA awareness and huge page support
  * Uses mmap with optional huge pages to reduce TLB overhead for large buffers */
-static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, size_t num_nodes, size_t *alloc_size) {
+static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, const bench_config_t *cfg, size_t num_nodes, size_t *alloc_size) {
     (void)pi;  /* only used with USE_NUMA */
     size_t size = num_nodes * sizeof(LatencyNode);
     *alloc_size = size;
 
     LatencyNode *memory = MAP_FAILED;
-    int try_hugepages = g_use_hugepages && (size >= get_huge_page_threshold());
+    int try_hugepages = cfg->use_hugepages && (size >= get_huge_page_threshold());
 
     if (try_hugepages) {
         /* Round up size to huge page boundary */
@@ -93,7 +94,7 @@ static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, size_
         memory = (LatencyNode *)mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
         if (memory != MAP_FAILED) {
-            if (g_verbose >= 2) {
+            if (cfg->verbose >= 2) {
                 fprintf(stderr, "  Latency: allocated %zu bytes using explicit 2MB huge pages\n", aligned_size);
             }
         }
@@ -106,10 +107,10 @@ static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, size_
             if (memory != MAP_FAILED) {
 #ifdef MADV_HUGEPAGE
                 if (madvise(memory, size, MADV_HUGEPAGE) == 0) {
-                    if (g_verbose >= 2) {
+                    if (cfg->verbose >= 2) {
                         fprintf(stderr, "  Latency: allocated %zu bytes with THP (transparent huge pages)\n", size);
                     }
-                } else if (g_verbose >= 2) {
+                } else if (cfg->verbose >= 2) {
                     fprintf(stderr, "  Latency: allocated %zu bytes (THP hint failed)\n", size);
                 }
 #endif
@@ -134,7 +135,7 @@ static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, size_
         if (node >= 0) {
             unsigned long nodemask = 1UL << node;
             mbind(memory, *alloc_size, MPOL_BIND, &nodemask, pi->numa_nodes + 1, MPOL_MF_MOVE);
-            if (g_verbose >= 2) {
+            if (cfg->verbose >= 2) {
                 fprintf(stderr, "  Latency memory bound to NUMA node %d\n", node);
             }
         }
@@ -155,11 +156,11 @@ static inline void free_latency_memory(LatencyNode *memory, size_t alloc_size) {
  * Memory is contiguous (good for allocation) but traversal is random
  * (defeats prefetcher, measures true memory latency)
  * Returns: start node pointer; caller must track alloc_size for freeing */
-static inline LatencyNode* init_latency_chain(const platform_info_t *pi, size_t num_nodes, size_t *alloc_size) {
+static inline LatencyNode* init_latency_chain(const platform_info_t *pi, const bench_config_t *cfg, size_t num_nodes, size_t *alloc_size) {
     if (num_nodes < 2) return NULL;
 
     /* Allocate contiguous memory for all nodes using NUMA-aware allocation */
-    LatencyNode *memory = alloc_latency_memory(pi, num_nodes, alloc_size);
+    LatencyNode *memory = alloc_latency_memory(pi, cfg, num_nodes, alloc_size);
     if (!memory) return NULL;
 
     /* Initialize payloads (also touches pages for NUMA first-touch policy) */
@@ -267,13 +268,13 @@ typedef struct {
  *
  * Returns statistically valid latency measurement
  */
-static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, size_t buffer_size) {
+static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, const bench_config_t *cfg, size_t buffer_size) {
     latency_stats_t stats = {0};
 
     /* Pin thread to CPU 0 for consistent latency measurement.
      * This prevents OS scheduler from migrating the thread during measurement,
      * which would cause inconsistent results due to cache effects and NUMA. */
-    pin_thread_to_cpu0();
+    pin_thread_to_cpu0(cfg->verbose);
 
     /* Calculate number of nodes that fit in buffer */
     size_t num_nodes = buffer_size / sizeof(LatencyNode);
@@ -281,7 +282,7 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, s
 
     /* Initialize chain with NUMA-aware allocation */
     size_t alloc_size = 0;
-    LatencyNode *start = init_latency_chain(pi, num_nodes, &alloc_size);
+    LatencyNode *start = init_latency_chain(pi, cfg, num_nodes, &alloc_size);
     if (!start) {
         fprintf(stderr, "Failed to allocate %zu bytes for latency test\n",
                 num_nodes * sizeof(LatencyNode));

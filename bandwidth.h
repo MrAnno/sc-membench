@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "config.h"
 #include "membench.h"
 #include "platform.h"
 #include "utils.h"
@@ -131,9 +132,9 @@ void mem_copy(void *dst, const void *src, size_t size) {
  * Memory allocation
  * ============================================================================ */
 
-static void* alloc_buffer(size_t size) {
+static void* alloc_buffer(const bench_config_t *cfg, size_t size) {
     void *buf = MAP_FAILED;
-    int try_hugepages = g_use_hugepages && (size >= get_huge_page_threshold());
+    int try_hugepages = cfg->use_hugepages && (size >= get_huge_page_threshold());
 
     if (try_hugepages) {
         /*
@@ -155,7 +156,7 @@ static void* alloc_buffer(size_t size) {
         buf = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
         if (buf != MAP_FAILED) {
-            if (g_verbose >= 2) {
+            if (cfg->verbose >= 2) {
                 fprintf(stderr, "  Allocated %zu bytes using explicit %zu KB huge pages\n",
                         aligned_size, hp_size / 1024);
             }
@@ -175,14 +176,14 @@ static void* alloc_buffer(size_t size) {
              * The kernel will use THP if available and beneficial.
              * This doesn't require root or pre-allocation. */
             if (madvise(buf, size, MADV_HUGEPAGE) == 0) {
-                if (g_verbose >= 2) {
+                if (cfg->verbose >= 2) {
                     fprintf(stderr, "  Allocated %zu bytes with THP (transparent huge pages)\n", size);
                 }
-            } else if (g_verbose >= 2) {
+            } else if (cfg->verbose >= 2) {
                 fprintf(stderr, "  Allocated %zu bytes (THP hint failed, using regular pages)\n", size);
             }
 #else
-            if (g_verbose >= 2) {
+            if (cfg->verbose >= 2) {
                 fprintf(stderr, "  Allocated %zu bytes (THP not available on this system)\n", size);
             }
 #endif
@@ -225,7 +226,7 @@ static void free_buffer(void *buf, size_t size) {
  * - Implicit barrier synchronization (more efficient than pthread_barrier)
  * - 8-accumulator read for optimal bandwidth measurement
  */
-static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
+static result_t run_benchmark_omp(const bench_config_t *cfg, size_t size, operation_t op, int nthreads) {
     result_t result = {0};
     result.size = size;
     result.op = op;
@@ -273,10 +274,10 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
 
         /* Fallback: regular allocation if NUMA not available or failed */
         if (!src_bufs[tid]) {
-            src_bufs[tid] = alloc_buffer(size);
+            src_bufs[tid] = alloc_buffer(cfg, size);
         }
         if (op == OP_COPY && !dst_bufs[tid]) {
-            dst_bufs[tid] = alloc_buffer(size);
+            dst_bufs[tid] = alloc_buffer(cfg, size);
         }
 
         /* Check allocation success */
@@ -312,7 +313,7 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
         free(dst_bufs);
         free(thread_elapsed);
         free(thread_checksums);
-        if (g_verbose) {
+        if (cfg->verbose) {
             fprintf(stderr, "Failed to allocate %zu bytes × %d threads\n", size, nthreads);
         }
         return result;
@@ -431,14 +432,14 @@ static result_t run_benchmark_omp(size_t size, operation_t op, int nthreads) {
 }
 
 /* Run single-threaded benchmark (for small buffers) */
-static result_t run_benchmark_single(size_t size, operation_t op) {
+static result_t run_benchmark_single(const bench_config_t *cfg, size_t size, operation_t op) {
     result_t result = {0};
     result.size = size;
     result.op = op;
     result.threads = 1;
 
-    void *src = alloc_buffer(size);
-    void *dst = (op == OP_COPY) ? alloc_buffer(size) : NULL;
+    void *src = alloc_buffer(cfg, size);
+    void *dst = (op == OP_COPY) ? alloc_buffer(cfg, size) : NULL;
 
     if (!src || (op == OP_COPY && !dst)) {
         free_buffer(src, size);
@@ -511,11 +512,11 @@ static result_t run_benchmark_single(size_t size, operation_t op) {
 }
 
 /* Main benchmark runner - dispatches to OpenMP or single-threaded */
-static result_t run_benchmark(size_t size, operation_t op, int nthreads) {
+static result_t run_benchmark(const bench_config_t *cfg, size_t size, operation_t op, int nthreads) {
     if (nthreads == 1) {
-        return run_benchmark_single(size, op);
+        return run_benchmark_single(cfg, size, op);
     }
-    return run_benchmark_omp(size, op, nthreads);
+    return run_benchmark_omp(cfg, size, op, nthreads);
 }
 
 /* Run benchmark multiple times and return the best (highest bandwidth) result,
@@ -524,16 +525,16 @@ static result_t run_benchmark(size_t size, operation_t op, int nthreads) {
  * First run is a warmup (discarded) to allow CPU frequency to ramp up
  * and caches to warm. This dramatically reduces result variability.
  */
-static result_t run_benchmark_best(size_t size, operation_t op, int nthreads) {
+static result_t run_benchmark_best(const bench_config_t *cfg, size_t size, operation_t op, int nthreads) {
     result_t best = {0};
 
     /* Warmup run - discarded.
      * This allows: CPU to reach turbo frequency, caches to warm,
      * thread scheduling to stabilize. Critical for consistent results. */
-    (void)run_benchmark(size, op, nthreads);
+    (void)run_benchmark(cfg, size, op, nthreads);
 
-    for (int try = 0; try < g_benchmark_tries; try++) {
-        result_t r = run_benchmark(size, op, nthreads);
+    for (int try = 0; try < cfg->benchmark_tries; try++) {
+        result_t r = run_benchmark(cfg, size, op, nthreads);
 
         if (try == 0 || r.bandwidth_mb_s > best.bandwidth_mb_s) {
             best = r;

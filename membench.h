@@ -19,9 +19,6 @@
 /* Maximum iterations per test */
 #define MAX_ITERATIONS 10000000
 
-/* Default total runtime target (seconds). 0 = unlimited */
-#define DEFAULT_MAX_RUNTIME 0
-
 /* Fixed RAM sizes for when we need to measure pure memory bandwidth */
 #define RAM_SIZE_1 (64UL * 1024 * 1024)   /* 64 MB - definitely past any L3 */
 #define RAM_SIZE_2 (256UL * 1024 * 1024)  /* 256 MB - more RAM data points */
@@ -48,17 +45,5 @@ typedef struct {
     double elapsed_s;
     int iterations;
 } result_t;
-
-
-extern int g_verbose;        /* 0=quiet, 1=summary, 2=detailed */
-extern int g_use_hugepages;
-extern int g_benchmark_tries;
-extern int g_human_readable;
-extern int g_explicit_threads;
-extern double g_max_runtime;
-extern size_t g_single_size;
-extern int g_full_sweep;
-extern int g_auto_scaling;
-extern int g_ops_mask;
 
 #endif /* MEMBENCH_H */

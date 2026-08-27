@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "config.h"
 #include "membench.h"
 #include "bandwidth.h"
 #include "latency.h"
@@ -73,8 +74,8 @@ static int* get_thread_counts(const platform_info_t *pi, int *count) {
  *
  * All sizes are strictly increasing with no overlaps.
  */
-static size_t* get_sizes(const platform_info_t *pi, int *count) {
-    int nthreads = g_explicit_threads > 0 ? g_explicit_threads : pi->num_cpus;
+static size_t* get_sizes(const platform_info_t *pi, const bench_config_t *cfg, int *count) {
+    int nthreads = cfg->explicit_threads > 0 ? cfg->explicit_threads : pi->num_cpus;
     if (nthreads < 1) nthreads = 1;
 
     /* Use detected cache sizes, with sensible defaults */
@@ -123,7 +124,7 @@ static size_t* get_sizes(const platform_info_t *pi, int *count) {
     ADD_SIZE(l3 * 4);
 
     /* Full sweep: add larger sizes up to memory limit */
-    if (g_full_sweep) {
+    if (cfg->full_sweep) {
         size_t ram_size = RAM_SIZE_2 * 2;
         while (ram_size <= max_size && n < 18) {
             ADD_SIZE(ram_size);
@@ -155,11 +156,11 @@ static size_t* get_sizes(const platform_info_t *pi, int *count) {
  * - Total memory = buffer_size * threads (or buffer_size * threads * 2 for copy)
  *
  * Three modes:
- * 1. Auto-scaling (g_auto_scaling=1): Try multiple thread counts, find best
- * 2. Explicit threads (g_explicit_threads>0): Use exactly that many threads
+ * 1. Auto-scaling (cfg->auto_scaling=1): Try multiple thread counts, find best
+ * 2. Explicit threads (cfg->explicit_threads>0): Use exactly that many threads
  * 3. Default (neither): Use num_cpus threads
  */
-static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, operation_t op,
+static result_t find_best_config(const platform_info_t *pi, const bench_config_t *cfg, size_t buffer_size, operation_t op,
                                  int *thread_counts, int tc_count) {
     result_t best = {0};
     best.size = buffer_size;
@@ -174,7 +175,7 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
         size_t latency_size = (buffer_size > max_latency) ? max_latency : buffer_size;
 
         double start = get_time();
-        latency_stats_t stats = measure_latency_stats(pi, latency_size);
+        latency_stats_t stats = measure_latency_stats(pi, cfg, latency_size);
         double elapsed = get_time() - start;
 
         best.size = buffer_size;
@@ -194,7 +195,7 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
     /* Bandwidth tests */
     int nthreads;
 
-    if (g_auto_scaling) {
+    if (cfg->auto_scaling) {
         /* Auto-scaling mode: try all thread counts, find best */
         for (int i = 0; i < tc_count; i++) {
             nthreads = thread_counts[i];
@@ -206,7 +207,7 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
                 continue;
             }
 
-            result_t r = run_benchmark_best(buffer_size, op, nthreads);
+            result_t r = run_benchmark_best(cfg, buffer_size, op, nthreads);
             r.size = buffer_size;
 
             if (r.bandwidth_mb_s > best.bandwidth_mb_s) {
@@ -215,7 +216,7 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
         }
 
         if (best.bandwidth_mb_s == 0) {
-            best = run_benchmark_best(buffer_size, op, 1);
+            best = run_benchmark_best(cfg, buffer_size, op, 1);
             best.size = buffer_size;
         }
 
@@ -223,8 +224,8 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
     }
 
     /* Fixed thread count mode */
-    if (g_explicit_threads > 0) {
-        nthreads = g_explicit_threads;
+    if (cfg->explicit_threads > 0) {
+        nthreads = cfg->explicit_threads;
     } else {
         nthreads = pi->num_cpus;
     }
@@ -237,89 +238,89 @@ static result_t find_best_config(const platform_info_t *pi, size_t buffer_size, 
         memory_needed = buffer_size * nthreads * bufs_per_op;
     }
 
-    best = run_benchmark_best(buffer_size, op, nthreads);
+    best = run_benchmark_best(cfg, buffer_size, op, nthreads);
     best.size = buffer_size;
 
     return best;
 }
 
-static void run_all_benchmarks(const platform_info_t *pi) {
+static void run_all_benchmarks(const platform_info_t *pi, const bench_config_t *cfg) {
     double start_time = get_time();
 
     int tc_count;
     int *thread_counts = get_thread_counts(pi, &tc_count);
 
     /* Single size mode */
-    if (g_single_size > 0) {
-        if (g_verbose) {
+    if (cfg->single_size > 0) {
+        if (cfg->verbose) {
             fprintf(stderr, "Testing buffer size: %zu KB per thread\n",
-                    g_single_size / 1024);
+                    cfg->single_size / 1024);
         }
 
-        print_csv_header();
+        print_csv_header(cfg);
 
         for (int op = 0; op < 4 && g_running; op++) {
-            if (!(g_ops_mask & (1 << op))) continue;
+            if (!(cfg->ops_mask & (1 << op))) continue;
 
-            result_t best = find_best_config(pi, g_single_size, (operation_t)op,
+            result_t best = find_best_config(pi, cfg, cfg->single_size, (operation_t)op,
                                             thread_counts, tc_count);
 
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
-                print_result(&best);
-                if (g_human_readable) update_summary(&best);
+                print_result(cfg, &best);
+                if (cfg->human_readable) update_summary(&best);
                 fflush(stdout);
             }
         }
 
         free(thread_counts);
 
-        if (g_verbose) {
+        if (cfg->verbose) {
             double total = get_time() - start_time;
             fprintf(stderr, "Total runtime: %.1f seconds\n", total);
         }
 
         /* Print summary in human-readable mode */
-        if (g_human_readable) print_summary(pi);
+        if (cfg->human_readable) print_summary(pi, cfg);
         return;
     }
 
     /* Normal mode: test all sizes */
     int size_count;
-    size_t *sizes = get_sizes(pi, &size_count);
+    size_t *sizes = get_sizes(pi, cfg, &size_count);
 
-    if (g_verbose) {
+    if (cfg->verbose) {
         fprintf(stderr, "Testing %d buffer sizes (per thread, adaptive to cache hierarchy)\n", size_count);
-        if (g_auto_scaling) {
+        if (cfg->auto_scaling) {
             fprintf(stderr, "Thread mode: auto-scaling (trying 1-%d threads)\n", pi->num_cpus);
-        } else if (g_explicit_threads > 0) {
-            fprintf(stderr, "Thread mode: fixed %d threads\n", g_explicit_threads);
+        } else if (cfg->explicit_threads > 0) {
+            fprintf(stderr, "Thread mode: fixed %d threads\n", cfg->explicit_threads);
         } else {
             fprintf(stderr, "Thread mode: num_cpus (%d threads)\n", pi->num_cpus);
         }
         fprintf(stderr, "OpenMP: proc_bind(spread) for NUMA-aware thread placement\n");
     }
 
-    print_csv_header();
+    print_csv_header(cfg);
 
     for (int s = 0; s < size_count && g_running; s++) {
         size_t size = sizes[s];
 
         for (int op = 0; op < 4 && g_running; op++) {
-            if (!(g_ops_mask & (1 << op))) continue;
+            if (!(cfg->ops_mask & (1 << op))) continue;
 
-            result_t best = find_best_config(pi, size, (operation_t)op,
+            result_t best = find_best_config(pi, cfg, size, (operation_t)op,
                                              thread_counts, tc_count);
 
             if (best.bandwidth_mb_s > 0 || best.latency_ns > 0) {
-                print_result(&best);
-                if (g_human_readable) update_summary(&best);
+                print_result(cfg, &best);
+                if (cfg->human_readable) update_summary(&best);
                 fflush(stdout);
             }
 
-            if (g_max_runtime > 0) {
+            if (cfg->max_runtime > 0) {
                 double elapsed = get_time() - start_time;
-                if (elapsed > g_max_runtime) {
-                    if (g_verbose) {
+                if (elapsed > cfg->max_runtime) {
+                    if (cfg->verbose) {
                         fprintf(stderr, "Time limit reached (%.1f s)\n", elapsed);
                     }
                     g_running = 0;
@@ -332,13 +333,13 @@ static void run_all_benchmarks(const platform_info_t *pi) {
     free(sizes);
     free(thread_counts);
 
-    if (g_verbose) {
+    if (cfg->verbose) {
         double total = get_time() - start_time;
         fprintf(stderr, "Total runtime: %.1f seconds\n", total);
     }
 
     /* Print summary in human-readable mode */
-    if (g_human_readable) print_summary(pi);
+    if (cfg->human_readable) print_summary(pi, cfg);
 }
 
 #endif /* MEMBENCH_RUNNER_H */
