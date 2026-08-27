@@ -63,16 +63,6 @@ struct LatencyNode {
 #define LATENCY_MAX_SAMPLES 21       /* Maximum samples (enough for robust statistics) */
 #define LATENCY_TARGET_CV 0.05       /* Target coefficient of variation (5%) */
 
-/* Fisher-Yates shuffle for node pointer array */
-static inline void shuffle_nodes(LatencyNode **nodes, size_t n) {
-    for (size_t i = n - 1; i > 0; i--) {
-        size_t j = (size_t)rand() % (i + 1);
-        LatencyNode *tmp = nodes[i];
-        nodes[i] = nodes[j];
-        nodes[j] = tmp;
-    }
-}
-
 /* Allocate memory for latency chain with NUMA awareness and huge page support
  * Uses mmap with optional huge pages to reduce TLB overhead for large buffers */
 static inline LatencyNode* alloc_latency_memory(const platform_info_t *pi, const bench_config_t *cfg, size_t num_nodes, size_t *alloc_size) {
@@ -163,33 +153,17 @@ static inline LatencyNode* init_latency_chain(const platform_info_t *pi, const b
     LatencyNode *memory = alloc_latency_memory(pi, cfg, num_nodes, alloc_size);
     if (!memory) return NULL;
 
-    /* Initialize payloads (also touches pages for NUMA first-touch policy) */
     for (size_t i = 0; i < num_nodes; i++) {
-        memory[i].payload = i;  /* Unique payload for each node */
+        memory[i].payload = i;
+        memory[i].next = &memory[i];
     }
-
-    /* Create array of pointers for shuffling */
-    LatencyNode **nodes = (LatencyNode **)malloc(num_nodes * sizeof(LatencyNode *));
-    if (!nodes) {
-        free_latency_memory(memory, *alloc_size);
-        return NULL;
+    for (size_t i = num_nodes - 1; i > 0; i--) {
+        size_t j = (size_t)rand() % i;
+        LatencyNode *tmp = memory[i].next;
+        memory[i].next = memory[j].next;
+        memory[j].next = tmp;
     }
-
-    for (size_t i = 0; i < num_nodes; i++) {
-        nodes[i] = &memory[i];
-    }
-
-    /* Shuffle to create random traversal order */
-    shuffle_nodes(nodes, num_nodes);
-
-    /* Link nodes in shuffled order (circular) */
-    for (size_t i = 0; i < num_nodes - 1; i++) {
-        nodes[i]->next = nodes[i + 1];
-    }
-    nodes[num_nodes - 1]->next = nodes[0];  /* Close the loop */
-
-    LatencyNode *start = nodes[0];
-    free(nodes);
+    LatencyNode *start = memory;
 
     return start;
 }
