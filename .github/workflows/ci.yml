@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            deps: sudo apt-get update && sudo apt-get install -y libhwloc-dev libnuma-dev libhugetlbfs-dev
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            deps: sudo apt-get update && sudo apt-get install -y libhwloc-dev libnuma-dev libhugetlbfs-dev
+          - name: macos-arm64
+            runner: macos-latest
+            deps: brew install llvm hwloc
+          - name: macos-x86_64
+            runner: macos-15-intel
+            deps: brew install llvm hwloc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: ${{ matrix.deps }}
+
+      # Apple clang ships no OpenMP
+      - name: Configure compiler (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make all
+
+      - name: Smoke test
+        run: ./membench -R -s 1024 -r 1
+
+  ci-freebsd:
+    name: freebsd-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y gmake hwloc2
+          run: |
+            gmake all
+            ./membench -R -s 1024 -r 1
