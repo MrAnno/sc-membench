@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "membench.h"
@@ -34,7 +35,16 @@
 
 const char *const OP_NAMES[] = {"read", "write", "copy", "latency"};
 
+static void bind_openmp_threads(char *argv[]) {
+    if (getenv("OMP_PROC_BIND") || getenv("OMP_PLACES")) return;
+    setenv("OMP_PROC_BIND", "spread", 1);
+    setenv("OMP_PLACES", "cores", 1);
+    execvp(argv[0], argv);
+}
+
 int main(int argc, char *argv[]) {
+    bind_openmp_threads(argv);
+
     bench_config_t cfg;
     switch (config_parse(argc, argv, &cfg)) {
         case CONFIG_EXIT_SUCCESS: return 0;
