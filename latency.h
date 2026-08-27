@@ -274,7 +274,8 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
     /* Pin thread to CPU 0 for consistent latency measurement.
      * This prevents OS scheduler from migrating the thread during measurement,
      * which would cause inconsistent results due to cache effects and NUMA. */
-    pin_thread_to_cpu0(cfg->verbose);
+    thread_affinity_t affinity;
+    pin_thread_to_cpu0(&affinity, cfg->verbose);
 
     /* Calculate number of nodes that fit in buffer */
     size_t num_nodes = buffer_size / sizeof(LatencyNode);
@@ -286,6 +287,7 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
     if (!start) {
         fprintf(stderr, "Failed to allocate %zu bytes for latency test\n",
                 num_nodes * sizeof(LatencyNode));
+        restore_thread_affinity(&affinity);
         return stats;
     }
 
@@ -367,6 +369,7 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
 
     /* Cleanup */
     free_latency_chain(start, num_nodes, alloc_size);
+    restore_thread_affinity(&affinity);
 
     return stats;
 }

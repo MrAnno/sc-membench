@@ -139,10 +139,19 @@ static inline size_t get_huge_page_threshold(void) {
 
 /* Pin current thread to CPU 0 for consistent latency measurement.
  * Platform-specific implementations for Linux, macOS, and BSD. */
-static inline void pin_thread_to_cpu0(int verbose) {
+#ifdef PLATFORM_LINUX
+typedef cpu_set_t thread_affinity_t;
+#elif defined(PLATFORM_BSD)
+typedef cpuset_t thread_affinity_t;
+#else
+typedef int thread_affinity_t;
+#endif
+
+static inline void pin_thread_to_cpu0(thread_affinity_t *saved, int verbose) {
     int success = 0;
 
 #ifdef PLATFORM_LINUX
+    sched_getaffinity(0, sizeof(*saved), saved);
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(0, &cpuset);
@@ -150,6 +159,7 @@ static inline void pin_thread_to_cpu0(int verbose) {
 #endif
 
 #ifdef PLATFORM_BSD
+    cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*saved), saved);
     cpuset_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(0, &cpuset);
@@ -158,6 +168,7 @@ static inline void pin_thread_to_cpu0(int verbose) {
 #endif
 
 #ifdef PLATFORM_MACOS
+    *saved = 0;
     /* macOS doesn't have true CPU affinity, but we can suggest affinity
      * via thread_policy_set with THREAD_AFFINITY_POLICY.
      * This is a hint, not a guarantee. */
@@ -175,6 +186,16 @@ static inline void pin_thread_to_cpu0(int verbose) {
         }
     }
     (void)success;  /* Suppress unused warning if no platform matched */
+}
+
+static inline void restore_thread_affinity(const thread_affinity_t *saved) {
+#ifdef PLATFORM_LINUX
+    sched_setaffinity(0, sizeof(*saved), saved);
+#elif defined(PLATFORM_BSD)
+    cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*saved), saved);
+#else
+    (void)saved;
+#endif
 }
 
 #endif /* MEMBENCH_PLATFORM_H */
