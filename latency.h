@@ -255,13 +255,14 @@ typedef struct {
  * short enough for reasonable total measurement time */
 #define LATENCY_TARGET_SAMPLE_TIME 0.1  /* 100ms per sample */
 #define LATENCY_MIN_SAMPLE_TIME 0.01    /* 10ms minimum for timer precision */
+#define LATENCY_CALIBRATION_ACCESSES (1UL << 20)
 
 /* Measure latency with statistical validity
  *
  * Strategy:
  * 1. Create random linked list covering the buffer size
- * 2. Warmup by traversing the list once
- * 3. Calibration run to estimate latency and calculate traversals needed
+ * 2. Warmup pass over the list
+ * 3. Calibration run to estimate latency and size the samples
  * 4. Collect multiple independent time samples
  * 5. Continue until CV < target or max samples reached
  * 6. Report median (robust to outliers) and statistics
@@ -291,31 +292,21 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
         return stats;
     }
 
-    /* Warmup: single traversal to prime caches and stabilize CPU */
-    chase_latency_chain(start, num_nodes);
+    size_t calibration_accesses = num_nodes < LATENCY_CALIBRATION_ACCESSES ? num_nodes : LATENCY_CALIBRATION_ACCESSES;
 
-    /* Calibration: time a single traversal to estimate latency */
+    /* Warmup: prime caches and stabilize CPU */
+    LatencyNode *node = chase_latency_chain(start, calibration_accesses);
+
+    /* Calibration: time a short run to estimate latency */
     double cal_start = get_time();
-    chase_latency_chain(start, num_nodes);
+    node = chase_latency_chain(node, calibration_accesses);
     double cal_elapsed = get_time() - cal_start;
 
-    /* Calculate traversals needed to achieve target sample time */
-    double estimated_latency_s = cal_elapsed / num_nodes;
-    size_t traversals_per_sample;
-
+    double estimated_latency_s = cal_elapsed / calibration_accesses;
+    size_t accesses_per_sample = calibration_accesses;
     if (estimated_latency_s > 0) {
-        /* Calculate traversals to reach target sample time */
         double target_accesses = LATENCY_TARGET_SAMPLE_TIME / estimated_latency_s;
-        traversals_per_sample = (size_t)(target_accesses / num_nodes);
-
-        /* Ensure at least 1 full traversal per sample */
-        if (traversals_per_sample < 1) traversals_per_sample = 1;
-
-        /* Cap at reasonable maximum for very fast (L1) accesses */
-        if (traversals_per_sample > 10000) traversals_per_sample = 10000;
-    } else {
-        /* Fallback: at least 1 traversal */
-        traversals_per_sample = 1;
+        if (target_accesses > accesses_per_sample) accesses_per_sample = (size_t)target_accesses;
     }
 
     /* Sample collection */
@@ -325,11 +316,11 @@ static inline latency_stats_t measure_latency_stats(const platform_info_t *pi, c
 
     /* Collect samples until statistically valid or max reached */
     while (num_samples < LATENCY_MAX_SAMPLES) {
-        size_t accesses_this_sample = num_nodes * traversals_per_sample;
+        size_t accesses_this_sample = accesses_per_sample;
 
         /* Time this sample */
         double start_time = get_time();
-        chase_latency_chain(start, accesses_this_sample);
+        node = chase_latency_chain(node, accesses_this_sample);
         double end_time = get_time();
 
         double elapsed = end_time - start_time;
