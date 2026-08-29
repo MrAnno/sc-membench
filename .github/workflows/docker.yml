@@ -3,14 +3,14 @@ name: Build and publish Docker image
 on:
   push:
     branches:
-      - main
+      - after-refactor
   release:
     types:
       - published
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: sparecores/membench
+  IMAGE: mranno/membench
   IMAGE_OUTPUT: type=registry,push=true,oci-mediatypes=true,compression=zstd,compression-level=7,force-compression=true
 
 jobs:
@@ -49,8 +49,7 @@ jobs:
           else
             {
               echo "tags<<EOF"
-              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:latest"
-              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:main"
+              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:after-refactor"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
@@ -109,8 +108,7 @@ jobs:
           else
             {
               echo "tags<<EOF"
-              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:latest"
-              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:main"
+              echo "${{ env.REGISTRY }}/${{ env.IMAGE }}:after-refactor"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
